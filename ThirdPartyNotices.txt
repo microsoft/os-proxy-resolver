@@ -1,0 +1,56 @@
+NOTICES
+
+This repository incorporates material as listed below or described in the code.
+
+---
+
+## pacparser
+
+Included as a git submodule under `vendor/pacparser`.
+
+- Project: pacparser
+- Homepage: https://github.com/manugarg/pacparser
+- Copyright (c) 2007-2015 Manu Garg and contributors
+- License: GNU Lesser General Public License, version 3 (LGPL-3.0-or-later)
+
+The full license text is available at `vendor/pacparser/COPYING` and at
+https://www.gnu.org/licenses/lgpl-3.0.html.
+
+On macOS and Linux, pacparser is statically linked into this project's compiled
+library, producing a combined work. See the LGPL-3.0 for the resulting
+obligations (including the requirement to allow relinking against a modified
+version of pacparser). Windows builds do not compile or link pacparser.
+
+---
+
+## QuickJS-NG
+
+Embedded within the pacparser sources under
+`vendor/pacparser/src/quickjs`.
+
+- Project: QuickJS-NG (a fork of QuickJS by Fabrice Bellard and Charlie Gordon)
+- Homepage: https://github.com/quickjs-ng/quickjs
+- Copyright (c) 2017-2026 Fabrice Bellard
+- Copyright (c) 2017-2018 Charlie Gordon
+- Copyright (c) 2023-2026 Ben Noordhuis
+- Copyright (c) 2023-2026 Saúl Ibarra Corretgé
+- Copyright (c) 2023 Marcin Kolny
+- License: MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1,0 +1,56 @@
+[package]
+name = "os-proxy-resolver"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+# First-party code is MIT (see LICENSE.txt); the bundled pacparser library
+# under vendor/pacparser is LGPL-3.0-or-later (see vendor/pacparser/COPYING).
+license = "MIT AND LGPL-3.0-or-later"
+description = "Resolve the OS-configured proxy (static, PAC, WPAD) for a URL, with change notification. WinHTTP on Windows; SystemConfiguration/gsettings + vendored pacparser (QuickJS) on macOS/Linux."
+repository = "https://github.com/microsoft/os-proxy-resolver"
+keywords = ["proxy", "pac", "wpad", "winhttp", "system-proxy"]
+categories = ["network-programming", "os"]
+exclude = [
+    "vendor/pacparser/tests",
+    "vendor/pacparser/web",
+    "vendor/pacparser/docs",
+    "vendor/pacparser/examples",
+    "vendor/pacparser/tools",
+    "vendor/pacparser/src/pymod",
+]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# Async change notification via tokio::sync::watch.
+tokio = ["dep:tokio"]
+
+[dependencies]
+url = "2"
+log = "0.4"
+tokio = { version = "1", optional = true, default-features = false, features = ["sync"] }
+
+[target.'cfg(not(windows))'.dependencies]
+# PAC / wpad.dat fetching. Sync, small, rustls-backed so no OpenSSL cross headaches.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+system-configuration = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+] }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }

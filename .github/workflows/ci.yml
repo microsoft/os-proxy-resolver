@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows: pure Rust — no C toolchain, no pacparser/QuickJS.
+          - name: windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            run_tests: true
+          - name: windows arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            run_tests: true
+
+          # macOS: native runners provide the C toolchain for pacparser.
+          - name: macos arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            run_tests: true
+          - name: macos x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            run_tests: true
+
+          # Linux x86_64: native.
+          - name: linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            run_tests: true
+
+          # Linux ARM: cross — its images ship the C cross-toolchain
+          # pacparser needs, and run tests under qemu.
+          - name: linux aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+            run_tests: true
+          - name: linux armv7
+            os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            use_cross: true
+            run_tests: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+        shell: bash
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Build
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --target ${{ matrix.target }} --all-features --examples
+        shell: bash
+
+      - name: Test
+        if: matrix.run_tests
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --all-features
+        shell: bash
+
+  lint:
+    name: rustfmt + clippy + docs
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-features --all-targets -- -D warnings
+      - run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
