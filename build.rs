@@ -93,4 +93,14 @@ fn main() {
     // A distributor shipping a prebuilt binary should place libpacparser next
     // to it and add an $ORIGIN (Linux) / @loader_path (macOS) rpath instead.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
+
+    // Also add a *relocatable* rpath so a prebuilt binary can find
+    // libpacparser when it's shipped right next to it (see the CI packaging).
+    // This is harmless in-tree — the absolute OUT_DIR rpath above is what dev
+    // builds actually use, since the dylib isn't next to the binary there.
+    if is_macos {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+    } else {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    }
 }

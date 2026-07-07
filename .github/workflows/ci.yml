@@ -84,6 +84,42 @@ jobs:
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --all-features
         shell: bash
 
+      - name: Build pactester (release)
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --example pactester
+        shell: bash
+
+      - name: Stage pactester artifact
+        run: |
+          ext=""
+          lib=""
+          case "${{ matrix.target }}" in
+            *windows*)        ext=".exe" ;;
+            *darwin*|*apple*) lib="libpacparser.dylib" ;;
+            *)                lib="libpacparser.so" ;;
+          esac
+          stage="dist/pactester-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/examples/pactester${ext}" "$stage/"
+          # On macOS/Linux pactester links libpacparser dynamically; ship it
+          # right next to the binary so the @loader_path / $ORIGIN rpath finds
+          # it (WinHTTP handles PAC on Windows, so there's no dylib there).
+          if [ -n "$lib" ]; then
+            found=$(find "target/${{ matrix.target }}/release/build" -name "$lib" | head -n1)
+            if [ -z "$found" ]; then
+              echo "::error::could not find $lib to bundle"
+              exit 1
+            fi
+            cp "$found" "$stage/"
+          fi
+        shell: bash
+
+      - name: Upload pactester artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pactester-${{ matrix.target }}
+          path: dist/pactester-${{ matrix.target }}/
+          if-no-files-found: error
+
   os-config-tests:
     name: os config round-trip (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
