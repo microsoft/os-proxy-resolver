@@ -14,7 +14,7 @@ use crate::types::ProxyKind;
 use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFGetTypeID, CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
-use core_foundation::dictionary::CFDictionary;
+use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::number::CFNumber;
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_foundation::string::CFString;
@@ -115,6 +115,62 @@ fn proxy_entry(
     Some(format!("{host}:{port}"))
 }
 
+/// DNS search domains from the OS resolver configuration, read from
+/// `SCDynamicStore` (`State:/Network/Global/DNS`). This reflects the live
+/// configuration including VPN / per-interface resolvers, which the legacy
+/// `/etc/resolv.conf` compatibility file often omits; we fall back to that
+/// file only when the dynamic store reports none.
+pub(crate) fn dns_search_domains() -> Vec<String> {
+    let store = SCDynamicStoreBuilder::<()>::new("os-proxy-resolver-dns").build();
+    let domains = read_dns_search_domains(&store);
+    if domains.is_empty() {
+        super::resolv_conf_search_domains()
+    } else {
+        domains
+    }
+}
+
+fn read_dns_search_domains(store: &SCDynamicStore) -> Vec<String> {
+    let Some(plist) = store.get(CFString::from_static_string("State:/Network/Global/DNS")) else {
+        return Vec::new();
+    };
+    let type_ref = plist.as_CFTypeRef();
+    if unsafe { CFGetTypeID(type_ref) } != CFDictionary::<CFString, CFType>::type_id() {
+        return Vec::new();
+    }
+    let dns = unsafe {
+        CFDictionary::<CFString, CFType>::wrap_under_get_rule(type_ref as CFDictionaryRef)
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |d: String| {
+        if !d.is_empty() && !out.contains(&d) {
+            out.push(d);
+        }
+    };
+
+    // `SearchDomains` (array of strings) is the primary, ordered source.
+    if let Some(v) = dns.find(CFString::from_static_string("SearchDomains")) {
+        let arr_ref = v.as_CFTypeRef();
+        if unsafe { CFGetTypeID(arr_ref) } == CFArray::<CFType>::type_id() {
+            let arr = unsafe { CFArray::<CFType>::wrap_under_get_rule(arr_ref as CFArrayRef) };
+            for item in arr.iter() {
+                if let Some(s) = item.downcast::<CFString>() {
+                    push(s.to_string());
+                }
+            }
+        }
+    }
+    // `DomainName` is the primary connection-specific domain; include it too.
+    if let Some(s) = dns
+        .find(CFString::from_static_string("DomainName"))
+        .and_then(|v| v.downcast::<CFString>())
+    {
+        push(s.to_string());
+    }
+    out
+}
+
 // --------------------------------------------------------------------------
 // Change watcher
 
@@ -142,6 +198,7 @@ pub(crate) fn spawn_watcher(on_change: Arc<dyn Fn() + Send + Sync>) -> Watcher {
             let keys = CFArray::from_CFTypes(&[
                 CFString::from_static_string("State:/Network/Global/Proxies"),
                 CFString::from_static_string("State:/Network/Global/IPv4"),
+                CFString::from_static_string("State:/Network/Global/DNS"),
             ]);
             let patterns = CFArray::from_CFTypes(&[] as &[CFString]);
             if !store.set_notification_keys(&keys, &patterns) {
@@ -179,5 +236,180 @@ impl Drop for Watcher {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    fn networksetup(args: &[&str]) -> Option<String> {
+        let out = Command::new("networksetup").args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Run one `scutil` `show <path>` query non-interactively.
+    fn scutil_show(path: &str) -> Option<String> {
+        let mut child = Command::new("scutil")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        {
+            let mut stdin = child.stdin.take()?;
+            stdin.write_all(format!("show {path}\n").as_bytes()).ok()?;
+            // Dropping stdin closes it, signalling EOF so scutil exits.
+        }
+        let out = child.wait_with_output().ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn scutil_field(text: &str, key: &str) -> Option<String> {
+        let prefix = format!("{key} :");
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix))
+            .map(|v| v.trim().to_string())
+    }
+
+    /// The primary network service — the one whose proxy settings
+    /// `SCDynamicStore` surfaces as the global configuration. Resolved from the
+    /// live global IPv4 state rather than guessed from service order.
+    fn primary_service() -> Option<String> {
+        let ipv4 = scutil_show("State:/Network/Global/IPv4")?;
+        let id = scutil_field(&ipv4, "PrimaryService")?;
+        let setup = scutil_show(&format!("Setup:/Network/Service/{id}"))?;
+        scutil_field(&setup, "UserDefinedName")
+    }
+
+    struct WebProxyState {
+        server: String,
+        port: String,
+        enabled: bool,
+    }
+
+    fn get_webproxy(service: &str, secure: bool) -> Option<WebProxyState> {
+        let cmd = if secure {
+            "-getsecurewebproxy"
+        } else {
+            "-getwebproxy"
+        };
+        let out = networksetup(&[cmd, service])?;
+        let mut state = WebProxyState {
+            server: String::new(),
+            port: String::new(),
+            enabled: false,
+        };
+        for line in out.lines() {
+            if let Some(v) = line.strip_prefix("Server:") {
+                state.server = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("Port:") {
+                state.port = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("Enabled:") {
+                state.enabled = v.trim() == "Yes";
+            }
+        }
+        Some(state)
+    }
+
+    /// Restores the service's web/secure-web proxy settings on drop so the test
+    /// never leaves the CI runner (or a developer's machine) reconfigured.
+    struct ProxyGuard {
+        service: String,
+        web: Option<WebProxyState>,
+        secure: Option<WebProxyState>,
+    }
+
+    impl ProxyGuard {
+        fn save(service: &str) -> Self {
+            ProxyGuard {
+                service: service.to_string(),
+                web: get_webproxy(service, false),
+                secure: get_webproxy(service, true),
+            }
+        }
+    }
+
+    impl Drop for ProxyGuard {
+        fn drop(&mut self) {
+            for (state, secure) in [(&self.web, false), (&self.secure, true)] {
+                let Some(state) = state else { continue };
+                let (set, toggle) = if secure {
+                    ("-setsecurewebproxy", "-setsecurewebproxystate")
+                } else {
+                    ("-setwebproxy", "-setwebproxystate")
+                };
+                let port = if state.port.is_empty() {
+                    "0"
+                } else {
+                    state.port.as_str()
+                };
+                let _ = networksetup(&[set, &self.service, &state.server, port]);
+                let _ = networksetup(&[
+                    toggle,
+                    &self.service,
+                    if state.enabled { "on" } else { "off" },
+                ]);
+            }
+        }
+    }
+
+    // Round-trips a static proxy config through the OS: writes it with
+    // `networksetup` and reads it back via `SCDynamicStore`. Only runs when
+    // `OS_PROXY_RESOLVER_OS_TESTS` is set (it mutates global network settings),
+    // which the dedicated CI job does.
+    #[test]
+    fn os_roundtrip_reads_networksetup_static() {
+        if std::env::var_os("OS_PROXY_RESOLVER_OS_TESTS").is_none() {
+            eprintln!(
+                "skipping os_roundtrip_reads_networksetup_static: \
+                 set OS_PROXY_RESOLVER_OS_TESTS=1 to run OS round-trip tests"
+            );
+            return;
+        }
+        let Some(service) = primary_service() else {
+            eprintln!("skipping os_roundtrip_reads_networksetup_static: no network service");
+            return;
+        };
+        let _guard = ProxyGuard::save(&service);
+
+        assert!(networksetup(&["-setwebproxy", &service, "hp.example.com", "3128"]).is_some());
+        assert!(networksetup(&["-setwebproxystate", &service, "on"]).is_some());
+        assert!(
+            networksetup(&["-setsecurewebproxy", &service, "sp.example.com", "8443"]).is_some()
+        );
+        assert!(networksetup(&["-setsecurewebproxystate", &service, "on"]).is_some());
+
+        // networksetup commits asynchronously; SCDynamicStore may briefly lag.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let rules = loop {
+            if let Some(rules) = read_config().static_rules {
+                if rules.http.is_some() && rules.https.is_some() {
+                    break rules;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "read_config did not reflect the networksetup proxy within 5s"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+
+        assert_eq!(
+            rules.http,
+            Some(ProxyKind::Http("hp.example.com:3128".into()))
+        );
+        assert_eq!(
+            rules.https,
+            Some(ProxyKind::Http("sp.example.com:8443".into()))
+        );
     }
 }

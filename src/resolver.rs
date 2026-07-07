@@ -221,16 +221,67 @@ impl ProxyResolver {
     }
 
     /// Evaluate a PAC script directly (bypassing OS config) against `url`.
-    /// Used by the `pactester` example and handy for testing PAC files.
-    /// Runs on the caged evaluator thread with the same sanitization and
-    /// hard timeout as regular resolution.
+    /// Handy for testing PAC files when you already have the script text; see
+    /// [`evaluate_pac_source`](Self::evaluate_pac_source) to load one from a
+    /// path or URL. Runs on the caged evaluator thread with the same
+    /// sanitization and hard timeout as regular resolution.
     #[cfg(not(windows))]
     pub fn evaluate_pac(&self, script: &str, url: &Url) -> Result<Vec<ProxyKind>> {
         let script: Arc<str> = Arc::from(script);
         self.pac_evaluator().find_proxy(&script, url, self.my_ip())
     }
 
+    /// Evaluate an explicit PAC source against `url`, bypassing OS config.
+    ///
+    /// `source` may be a local filesystem path, a `file://` URL, or an
+    /// `http(s)://` URL. Off Windows the script is read (or fetched) and run on
+    /// the vendored engine. On Windows evaluation is delegated to WinHTTP,
+    /// which only loads PAC over `http(s)`; a local path / `file://` URL is
+    /// therefore rejected there (serve it over http instead — the `pactester`
+    /// example does this for you).
+    #[cfg(not(windows))]
+    pub fn evaluate_pac_source(&self, source: &str, url: &Url) -> Result<Vec<ProxyKind>> {
+        let pac_url = pac_source_to_url(source)?;
+        let script =
+            crate::fetch::fetch_pac(pac_url.as_str(), self.inner.options.pac_fetch_timeout)?;
+        self.evaluate_pac(&script, url)
+    }
+
+    /// See the non-Windows variant. WinHTTP performs the evaluation and only
+    /// accepts `http(s)` PAC URLs.
+    #[cfg(windows)]
+    pub fn evaluate_pac_source(&self, source: &str, url: &Url) -> Result<Vec<ProxyKind>> {
+        if url.host_str().is_none() {
+            return Err(Error::InvalidUrl(url.to_string()));
+        }
+        let pac_url = pac_source_to_url(source)?;
+        if !matches!(pac_url.scheme(), "http" | "https") {
+            return Err(Error::PacFetch(format!(
+                "WinHTTP can only load PAC from http(s) URLs, not {source}"
+            )));
+        }
+        let winhttp = self
+            .winhttp()
+            .ok_or_else(|| Error::Platform("WinHTTP session unavailable".into()))?;
+        winhttp
+            .get_proxy_for_url(url, false, Some(pac_url.as_str()))
+            .ok_or_else(|| Error::PacEval(format!("WinHTTP could not evaluate PAC {source}")))
+    }
+
     // -- internals ---------------------------------------------------------
+
+    /// The lazily-created WinHTTP session used for PAC/WPAD resolution.
+    #[cfg(windows)]
+    fn winhttp(&self) -> Option<&platform::WinHttpResolver> {
+        self.inner
+            .winhttp
+            .get_or_init(|| {
+                platform::WinHttpResolver::new()
+                    .map_err(|e| log::warn!("{e}"))
+                    .ok()
+            })
+            .as_ref()
+    }
 
     fn os_config(&self) -> OsProxyConfig {
         let generation = self.inner.notifier.generation();
@@ -287,12 +338,7 @@ impl ProxyResolver {
     #[cfg(windows)]
     fn resolve_from_os(&self, config: &OsProxyConfig, url: &Url) -> Vec<ProxyKind> {
         if config.auto_detect || config.pac_url.is_some() {
-            let winhttp = self.inner.winhttp.get_or_init(|| {
-                platform::WinHttpResolver::new()
-                    .map_err(|e| log::warn!("{e}"))
-                    .ok()
-            });
-            if let Some(winhttp) = winhttp {
+            if let Some(winhttp) = self.winhttp() {
                 if let Some(list) =
                     winhttp.get_proxy_for_url(url, config.auto_detect, config.pac_url.as_deref())
                 {
@@ -432,6 +478,20 @@ impl Default for ProxyResolver {
     }
 }
 
+/// Interpret a `--pac-script`-style value as a URL: a recognized scheme
+/// (`http`/`https`/`file`) is kept as-is; anything else is treated as a local
+/// filesystem path and canonicalized into a `file://` URL.
+fn pac_source_to_url(source: &str) -> Result<Url> {
+    if let Ok(u) = Url::parse(source) {
+        if matches!(u.scheme(), "http" | "https" | "file") {
+            return Ok(u);
+        }
+    }
+    let path =
+        std::fs::canonicalize(source).map_err(|e| Error::PacFetch(format!("{source}: {e}")))?;
+    Url::from_file_path(&path).map_err(|_| Error::PacFetch(format!("{source}: not a file path")))
+}
+
 impl std::fmt::Debug for ProxyResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProxyResolver")
@@ -541,5 +601,46 @@ mod tests {
             )
             .unwrap();
         assert_eq!(got, vec![ProxyKind::Http("p:1".into()), ProxyKind::Direct]);
+    }
+
+    // Serves a PAC over http and evaluates it via the public API. Exercises the
+    // real engine on every platform (pacparser off Windows, WinHTTP on it),
+    // which is also the path the `pactester` example drives.
+    #[test]
+    fn evaluate_pac_source_over_http() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let pac = "function FindProxyForURL(url, host) { return 'PROXY p:1; DIRECT'; }";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = pac.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/x-ns-proxy-autoconfig\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let r = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+        let pac_url = format!("http://{addr}/proxy.pac");
+        let got = r
+            .evaluate_pac_source(&pac_url, &url("https://x.com/"))
+            .unwrap();
+
+        // WinHTTP drops a trailing DIRECT; pacparser keeps it. Both agree on
+        // the primary proxy.
+        assert_eq!(got.first(), Some(&ProxyKind::Http("p:1".into())));
     }
 }

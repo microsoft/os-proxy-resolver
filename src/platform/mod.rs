@@ -30,6 +30,38 @@ mod imp;
 pub(crate) use imp::WinHttpResolver;
 pub(crate) use imp::{read_config, spawn_watcher, Watcher};
 
+/// The OS-configured DNS search domains, used to derive `wpad.<domain>`
+/// candidates. macOS reads them from `SCDynamicStore`; Linux from
+/// `/etc/resolv.conf`.
+#[cfg(not(windows))]
+pub(crate) use imp::dns_search_domains;
+
+/// DNS search domains parsed from `/etc/resolv.conf` (`search` / `domain`
+/// lines), order-preserving and de-duplicated. Shared by the unix config
+/// sources (Linux uses it directly; macOS falls back to it when
+/// `SCDynamicStore` has none).
+#[cfg(not(windows))]
+pub(crate) fn resolv_conf_search_domains() -> Vec<String> {
+    let mut domains = Vec::new();
+    let Ok(conf) = std::fs::read_to_string("/etc/resolv.conf") else {
+        return domains;
+    };
+    for line in conf.lines() {
+        let line = line.trim();
+        if let Some(rest) = line
+            .strip_prefix("search")
+            .or_else(|| line.strip_prefix("domain"))
+        {
+            for d in rest.split_whitespace() {
+                if !domains.iter().any(|existing| existing == d) {
+                    domains.push(d.to_string());
+                }
+            }
+        }
+    }
+    domains
+}
+
 /// Snapshot of the OS proxy configuration. Multiple mechanisms can be active
 /// at once (macOS allows auto-detect + PAC URL + static simultaneously);
 /// resolution tries them in that order.

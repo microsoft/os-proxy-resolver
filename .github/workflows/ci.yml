@@ -84,6 +84,94 @@ jobs:
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --all-features
         shell: bash
 
+      - name: Build pactester (release)
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --example pactester
+        shell: bash
+
+      - name: Stage pactester artifact
+        run: |
+          ext=""
+          lib=""
+          case "${{ matrix.target }}" in
+            *windows*)        ext=".exe" ;;
+            *darwin*|*apple*) lib="libpacparser.dylib" ;;
+            *)                lib="libpacparser.so" ;;
+          esac
+          stage="dist/pactester-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "target/${{ matrix.target }}/release/examples/pactester${ext}" "$stage/"
+          # On macOS/Linux pactester links libpacparser dynamically; ship it
+          # right next to the binary so the @loader_path / $ORIGIN rpath finds
+          # it (WinHTTP handles PAC on Windows, so there's no dylib there).
+          if [ -n "$lib" ]; then
+            found=$(find "target/${{ matrix.target }}/release/build" -name "$lib" | head -n1)
+            if [ -z "$found" ]; then
+              echo "::error::could not find $lib to bundle"
+              exit 1
+            fi
+            cp "$found" "$stage/"
+          fi
+        shell: bash
+
+      - name: Upload pactester artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pactester-${{ matrix.target }}
+          path: dist/pactester-${{ matrix.target }}/
+          if-no-files-found: error
+
+  os-config-tests:
+    name: os config round-trip (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+          - name: macos
+            os: macos-latest
+          - name: linux
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+        shell: bash
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: os-config-${{ matrix.os }}
+
+      # Linux needs a session bus + dconf backend + the GNOME proxy schema so
+      # `gsettings` has somewhere to read/write; the runner image is headless.
+      - name: Install GNOME proxy schema (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dbus dconf-gsettings-backend gsettings-desktop-schemas glib-networking
+        shell: bash
+
+      # These tests read the real OS proxy config after configuring it, so they
+      # only run here (gated behind OS_PROXY_RESOLVER_OS_TESTS). On Linux the
+      # whole thing runs under a private D-Bus session.
+      - name: Run OS round-trip tests
+        env:
+          OS_PROXY_RESOLVER_OS_TESTS: "1"
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            dbus-run-session -- cargo test --all-features os_roundtrip -- --nocapture
+          else
+            cargo test --all-features os_roundtrip -- --nocapture
+          fi
+        shell: bash
+
   lint:
     name: rustfmt + clippy + docs
     runs-on: macos-latest

@@ -381,4 +381,138 @@ mod tests {
             vec![ProxyKind::Http("b:2".into()), ProxyKind::Http("c:3".into())]
         );
     }
+
+    use std::process::Command;
+
+    const CONN_KEY: &str =
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections";
+    const DCS_VALUE: &str = "DefaultConnectionSettings";
+
+    /// Build the `DefaultConnectionSettings` REG_BINARY blob that
+    /// `WinHttpGetIEProxyConfigForCurrentUser` parses (it reads this blob, not
+    /// the legacy `ProxyServer`/`ProxyEnable` string values). Returned as a hex
+    /// string for `reg add /t REG_BINARY /d`.
+    fn build_dcs(flags: u32, proxy: &str, bypass: &str, pac: &str) -> String {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(&0x46u32.to_le_bytes()); // version
+        b.extend_from_slice(&0u32.to_le_bytes()); // change counter
+        b.extend_from_slice(&flags.to_le_bytes());
+        for s in [proxy, bypass, pac] {
+            b.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            b.extend_from_slice(s.as_bytes());
+        }
+        b.extend_from_slice(&[0u8; 32]); // trailing padding
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    fn reg_query_dcs() -> Option<String> {
+        let out = Command::new("reg")
+            .args(["query", CONN_KEY, "/v", DCS_VALUE])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        // Line looks like: `    DefaultConnectionSettings    REG_BINARY    4600...`
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix(DCS_VALUE)?
+                    .trim()
+                    .strip_prefix("REG_BINARY")
+                    .map(|hex| hex.trim().to_string())
+            })
+    }
+
+    fn reg_set_dcs(hex: &str) -> bool {
+        Command::new("reg")
+            .args([
+                "add",
+                CONN_KEY,
+                "/v",
+                DCS_VALUE,
+                "/t",
+                "REG_BINARY",
+                "/d",
+                hex,
+                "/f",
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Restores (or deletes) the original `DefaultConnectionSettings` on drop.
+    struct DcsGuard {
+        original: Option<String>,
+    }
+
+    impl DcsGuard {
+        fn save() -> Self {
+            DcsGuard {
+                original: reg_query_dcs(),
+            }
+        }
+    }
+
+    impl Drop for DcsGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(hex) => {
+                    let _ = reg_set_dcs(hex);
+                }
+                None => {
+                    let _ = Command::new("reg")
+                        .args(["delete", CONN_KEY, "/v", DCS_VALUE, "/f"])
+                        .status();
+                }
+            }
+        }
+    }
+
+    // Round-trips a static per-scheme proxy config through the WinINET registry
+    // blob and reads it back via `read_config`. Only runs when
+    // `OS_PROXY_RESOLVER_OS_TESTS` is set (it mutates the current user's IE
+    // proxy settings), which the dedicated CI job does.
+    #[test]
+    fn os_roundtrip_reads_ie_static() {
+        if std::env::var_os("OS_PROXY_RESOLVER_OS_TESTS").is_none() {
+            eprintln!(
+                "skipping os_roundtrip_reads_ie_static: \
+                 set OS_PROXY_RESOLVER_OS_TESTS=1 to run OS round-trip tests"
+            );
+            return;
+        }
+        let _guard = DcsGuard::save();
+
+        // flags 0x03 = 0x01 (always set) | 0x02 (manual proxy enabled).
+        let hex = build_dcs(
+            0x03,
+            "http=hp.example.com:3128;https=sp.example.com:8443;socks=sk.example.com:1080",
+            "localhost;<local>",
+            "",
+        );
+        assert!(
+            reg_set_dcs(&hex),
+            "failed to write DefaultConnectionSettings"
+        );
+
+        let cfg = read_config();
+        let rules = cfg
+            .static_rules
+            .expect("expected static rules from IE proxy settings");
+        assert_eq!(
+            rules.http,
+            Some(ProxyKind::Http("hp.example.com:3128".into()))
+        );
+        assert_eq!(
+            rules.https,
+            Some(ProxyKind::Http("sp.example.com:8443".into()))
+        );
+        assert_eq!(
+            rules.socks,
+            Some(ProxyKind::Socks("sk.example.com:1080".into()))
+        );
+    }
 }
