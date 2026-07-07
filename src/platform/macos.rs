@@ -14,7 +14,7 @@ use crate::types::ProxyKind;
 use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFGetTypeID, CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
-use core_foundation::dictionary::CFDictionary;
+use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::number::CFNumber;
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_foundation::string::CFString;
@@ -115,6 +115,62 @@ fn proxy_entry(
     Some(format!("{host}:{port}"))
 }
 
+/// DNS search domains from the OS resolver configuration, read from
+/// `SCDynamicStore` (`State:/Network/Global/DNS`). This reflects the live
+/// configuration including VPN / per-interface resolvers, which the legacy
+/// `/etc/resolv.conf` compatibility file often omits; we fall back to that
+/// file only when the dynamic store reports none.
+pub(crate) fn dns_search_domains() -> Vec<String> {
+    let store = SCDynamicStoreBuilder::<()>::new("os-proxy-resolver-dns").build();
+    let domains = read_dns_search_domains(&store);
+    if domains.is_empty() {
+        super::resolv_conf_search_domains()
+    } else {
+        domains
+    }
+}
+
+fn read_dns_search_domains(store: &SCDynamicStore) -> Vec<String> {
+    let Some(plist) = store.get(CFString::from_static_string("State:/Network/Global/DNS")) else {
+        return Vec::new();
+    };
+    let type_ref = plist.as_CFTypeRef();
+    if unsafe { CFGetTypeID(type_ref) } != CFDictionary::<CFString, CFType>::type_id() {
+        return Vec::new();
+    }
+    let dns = unsafe {
+        CFDictionary::<CFString, CFType>::wrap_under_get_rule(type_ref as CFDictionaryRef)
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |d: String| {
+        if !d.is_empty() && !out.contains(&d) {
+            out.push(d);
+        }
+    };
+
+    // `SearchDomains` (array of strings) is the primary, ordered source.
+    if let Some(v) = dns.find(CFString::from_static_string("SearchDomains")) {
+        let arr_ref = v.as_CFTypeRef();
+        if unsafe { CFGetTypeID(arr_ref) } == CFArray::<CFType>::type_id() {
+            let arr = unsafe { CFArray::<CFType>::wrap_under_get_rule(arr_ref as CFArrayRef) };
+            for item in arr.iter() {
+                if let Some(s) = item.downcast::<CFString>() {
+                    push(s.to_string());
+                }
+            }
+        }
+    }
+    // `DomainName` is the primary connection-specific domain; include it too.
+    if let Some(s) = dns
+        .find(CFString::from_static_string("DomainName"))
+        .and_then(|v| v.downcast::<CFString>())
+    {
+        push(s.to_string());
+    }
+    out
+}
+
 // --------------------------------------------------------------------------
 // Change watcher
 
@@ -142,6 +198,7 @@ pub(crate) fn spawn_watcher(on_change: Arc<dyn Fn() + Send + Sync>) -> Watcher {
             let keys = CFArray::from_CFTypes(&[
                 CFString::from_static_string("State:/Network/Global/Proxies"),
                 CFString::from_static_string("State:/Network/Global/IPv4"),
+                CFString::from_static_string("State:/Network/Global/DNS"),
             ]);
             let patterns = CFArray::from_CFTypes(&[] as &[CFString]);
             if !store.set_notification_keys(&keys, &patterns) {

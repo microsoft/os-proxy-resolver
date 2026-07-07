@@ -7,8 +7,9 @@
 //! DHCP option 252, from WinHTTP). DHCP-based WPAD is a documented non-goal
 //! here.
 //!
-//! Strategy: take the DNS search domains from `/etc/resolv.conf`, and for
-//! each, walk up the suffix (`wpad.a.b.example.com`, `wpad.b.example.com`,
+//! Strategy: take the DNS search domains from the OS resolver configuration
+//! (macOS `SCDynamicStore`, Linux `/etc/resolv.conf`), and for each, walk up
+//! the suffix (`wpad.a.b.example.com`, `wpad.b.example.com`,
 //! `wpad.example.com`) — never above the registrable-ish boundary (a
 //! candidate must keep at least two labels after `wpad.`, so `wpad.com` is
 //! never queried; WPAD walking into a TLD is a classic hijack vector).
@@ -73,23 +74,7 @@ pub(crate) fn candidate_hosts(domains: &[String]) -> Vec<String> {
 }
 
 fn search_domains() -> Vec<String> {
-    let mut domains = Vec::new();
-    if let Ok(conf) = std::fs::read_to_string("/etc/resolv.conf") {
-        for line in conf.lines() {
-            let line = line.trim();
-            if let Some(rest) = line
-                .strip_prefix("search")
-                .or_else(|| line.strip_prefix("domain"))
-            {
-                for d in rest.split_whitespace() {
-                    if !domains.contains(&d.to_string()) {
-                        domains.push(d.to_string());
-                    }
-                }
-            }
-        }
-    }
-    domains
+    crate::platform::dns_search_domains()
 }
 
 /// DNS probe with a hard timeout. `ToSocketAddrs` has no timeout knob, so the

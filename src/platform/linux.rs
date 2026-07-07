@@ -179,6 +179,13 @@ impl Drop for Watcher {
     }
 }
 
+/// DNS search domains from the OS resolver configuration. On Linux this is
+/// `/etc/resolv.conf` (written by systemd-resolved / NetworkManager / the
+/// DHCP client), which is the OS-native source.
+pub(crate) fn dns_search_domains() -> Vec<String> {
+    super::resolv_conf_search_domains()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
