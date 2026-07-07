@@ -1,0 +1,20 @@
+[package]
+name = "pac-eval"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Evaluate PAC (Proxy Auto-Config) files with an embedded QuickJS-NG JavaScript engine"
+keywords = ["pac", "proxy", "wpad", "quickjs", "proxy-auto-config"]
+categories = ["network-programming"]
+readme = "README.md"
+
+[dependencies]
+# MIT-licensed pre-generated bindings that vendor and compile the MIT-licensed
+# quickjs-ng C sources via `cc`. See THIRD-PARTY-NOTICES.md.
+rquickjs-sys = "0.12.1"
+
+[features]
+default = ["microsoft-extensions"]
+# Microsoft IPv6 PAC extensions: dnsResolveEx, myIpAddressEx, isResolvableEx,
+# isInNetEx, sortIpAddressList, getClientVersion and FindProxyForURLEx support.
+microsoft-extensions = []
