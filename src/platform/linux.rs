@@ -251,4 +251,136 @@ org.gnome.system.proxy.socks port 1080
         assert_eq!(parse_string_array("@as []"), Vec::<String>::new());
         assert_eq!(parse_string_array("['a', 'b']"), vec!["a", "b"]);
     }
+
+    fn gsettings_get(schema: &str, key: &str) -> Option<String> {
+        let out = Command::new("gsettings")
+            .args(["get", schema, key])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn gsettings_set(schema: &str, key: &str, value: &str) -> bool {
+        Command::new("gsettings")
+            .args(["set", schema, key, value])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Restores the touched GSettings keys on drop. Values captured with
+    /// `gsettings get` are already in the exact form `gsettings set` accepts.
+    struct GSettingsGuard {
+        saved: Vec<(&'static str, &'static str, Option<String>)>,
+    }
+
+    impl GSettingsGuard {
+        fn save(keys: &[(&'static str, &'static str)]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|&(schema, key)| (schema, key, gsettings_get(schema, key)))
+                .collect();
+            GSettingsGuard { saved }
+        }
+    }
+
+    impl Drop for GSettingsGuard {
+        fn drop(&mut self) {
+            for (schema, key, value) in &self.saved {
+                if let Some(value) = value {
+                    let _ = gsettings_set(schema, key, value);
+                }
+            }
+        }
+    }
+
+    // Round-trips manual and auto proxy configs through GNOME's GSettings and
+    // reads them back via `read_config`. Only runs when
+    // `OS_PROXY_RESOLVER_OS_TESTS` is set (it mutates the session's proxy
+    // settings and needs a working D-Bus/dconf backend), which the dedicated
+    // CI job provides via `dbus-run-session`.
+    #[test]
+    fn os_roundtrip_reads_gsettings_manual_and_auto() {
+        if std::env::var_os("OS_PROXY_RESOLVER_OS_TESTS").is_none() {
+            eprintln!(
+                "skipping os_roundtrip_reads_gsettings_manual_and_auto: \
+                 set OS_PROXY_RESOLVER_OS_TESTS=1 to run OS round-trip tests"
+            );
+            return;
+        }
+        // No working gsettings / GNOME proxy schema (e.g. headless minimal
+        // image) means there is nothing to round-trip through.
+        if gsettings_get("org.gnome.system.proxy", "mode").is_none() {
+            eprintln!(
+                "skipping os_roundtrip_reads_gsettings_manual_and_auto: \
+                 gsettings org.gnome.system.proxy unavailable"
+            );
+            return;
+        }
+
+        let _guard = GSettingsGuard::save(&[
+            ("org.gnome.system.proxy", "mode"),
+            ("org.gnome.system.proxy", "autoconfig-url"),
+            ("org.gnome.system.proxy", "ignore-hosts"),
+            ("org.gnome.system.proxy.http", "host"),
+            ("org.gnome.system.proxy.http", "port"),
+            ("org.gnome.system.proxy.socks", "host"),
+            ("org.gnome.system.proxy.socks", "port"),
+        ]);
+
+        assert!(gsettings_set(
+            "org.gnome.system.proxy.http",
+            "host",
+            "hp.example.com"
+        ));
+        assert!(gsettings_set("org.gnome.system.proxy.http", "port", "3128"));
+        assert!(gsettings_set(
+            "org.gnome.system.proxy.socks",
+            "host",
+            "sp.example.com"
+        ));
+        assert!(gsettings_set(
+            "org.gnome.system.proxy.socks",
+            "port",
+            "1080"
+        ));
+        assert!(gsettings_set(
+            "org.gnome.system.proxy",
+            "ignore-hosts",
+            "['localhost', '127.0.0.0/8']"
+        ));
+        // Set the mode last so the read observes a fully-populated config.
+        assert!(gsettings_set("org.gnome.system.proxy", "mode", "manual"));
+
+        let cfg = read_config();
+        let rules = cfg
+            .static_rules
+            .expect("expected static rules from manual gsettings config");
+        assert_eq!(
+            rules.http,
+            Some(ProxyKind::Http("hp.example.com:3128".into()))
+        );
+        assert_eq!(
+            rules.socks,
+            Some(ProxyKind::Socks("sp.example.com:1080".into()))
+        );
+        assert!(rules.bypass.matches("localhost", 80));
+
+        // Auto mode with an explicit PAC URL.
+        assert!(gsettings_set(
+            "org.gnome.system.proxy",
+            "autoconfig-url",
+            "http://wpad.example.com/proxy.pac"
+        ));
+        assert!(gsettings_set("org.gnome.system.proxy", "mode", "auto"));
+        let cfg = read_config();
+        assert_eq!(
+            cfg.pac_url.as_deref(),
+            Some("http://wpad.example.com/proxy.pac")
+        );
+        assert!(!cfg.auto_detect);
+    }
 }
