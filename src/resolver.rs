@@ -235,9 +235,9 @@ impl ProxyResolver {
     ///
     /// `source` may be a local filesystem path, a `file://` URL, or an
     /// `http(s)://` URL. Off Windows the script is read (or fetched) and run on
-    /// the vendored engine. On Windows evaluation is delegated to WinHTTP,
+    /// the built-in engine. On Windows evaluation is delegated to WinHTTP,
     /// which only loads PAC over `http(s)`; a local path / `file://` URL is
-    /// therefore rejected there (serve it over http instead — the `pactester`
+    /// therefore rejected there (serve it over http instead — the `proxytester`
     /// example does this for you).
     #[cfg(not(windows))]
     pub fn evaluate_pac_source(&self, source: &str, url: &Url) -> Result<Vec<ProxyKind>> {
@@ -605,7 +605,7 @@ mod tests {
 
     // Serves a PAC over http and evaluates it via the public API. Exercises the
     // real engine on every platform (the built-in QuickJS engine off Windows,
-    // WinHTTP on it), which is also the path the `pactester` example drives.
+    // WinHTTP on it), which is also the path the `proxytester` example drives.
     #[test]
     fn evaluate_pac_source_over_http() {
         use std::io::{Read, Write};

@@ -8,8 +8,8 @@
 //! list per URL. Works on every platform.
 //!
 //! ```text
-//! cargo run --example pactester -- <url> [<url>...]
-//! cargo run --example pactester -- --pac-script <path-or-url> <url> [<url>...]
+//! cargo run --example proxytester -- <url> [<url>...]
+//! cargo run --example proxytester -- --pac-script <path-or-url> <url> [<url>...]
 //! ```
 //!
 //! With `--pac-script`, the given PAC file is evaluated instead of the OS
@@ -84,7 +84,7 @@ fn main() {
 
 fn print_usage() {
     eprintln!(
-        "usage: pactester [--pac-script <path-or-url>] <url> [<url>...]\n\
+        "usage: proxytester [--pac-script <path-or-url>] <url> [<url>...]\n\
          \n\
          Without --pac-script, resolves each URL via the OS proxy config, WPAD,\n\
          and any configured PAC script. With --pac-script, evaluates the given\n\

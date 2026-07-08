@@ -126,7 +126,7 @@ Examples:
 ```sh
 cargo run --example resolve -- https://example.com/   # live OS config
 cargo run --example resolve -- --watch                # watch for changes
-cargo run --example pactester -- file.pac http://url/ # macOS/Linux
+cargo run --example proxytester -- --pac-script file.pac http://url/ # test a PAC file
 ```
 
 Builds as both `rlib` and `cdylib`. Release automation with `cargo-dist` is a

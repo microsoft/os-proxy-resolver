@@ -82,28 +82,28 @@ jobs:
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --all-features
         shell: bash
 
-      - name: Build pactester (release)
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --example pactester
+      - name: Build proxytester (release)
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --example proxytester
         shell: bash
 
-      - name: Stage pactester artifact
+      - name: Stage proxytester artifact
         run: |
           ext=""
           case "${{ matrix.target }}" in
             *windows*) ext=".exe" ;;
           esac
-          stage="dist/pactester-${{ matrix.target }}"
+          stage="dist/proxytester-${{ matrix.target }}"
           mkdir -p "$stage"
-          # QuickJS is statically linked into the binary, so pactester is
+          # QuickJS is statically linked into the binary, so proxytester is
           # self-contained (WinHTTP handles PAC on Windows).
-          cp "target/${{ matrix.target }}/release/examples/pactester${ext}" "$stage/"
+          cp "target/${{ matrix.target }}/release/examples/proxytester${ext}" "$stage/"
         shell: bash
 
-      - name: Upload pactester artifact
+      - name: Upload proxytester artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pactester-${{ matrix.target }}
-          path: dist/pactester-${{ matrix.target }}/
+          name: proxytester-${{ matrix.target }}
+          path: dist/proxytester-${{ matrix.target }}/
           if-no-files-found: error
 
   os-config-tests:
