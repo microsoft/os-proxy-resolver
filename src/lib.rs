@@ -81,7 +81,9 @@ mod env_cfg;
 #[cfg(not(windows))]
 mod fetch;
 mod notify;
-#[cfg(not(windows))]
+// The QuickJS PAC engine is always built off Windows; on Windows it is built
+// only for the `pac_bench` benchmark (feature `pac-engine`).
+#[cfg(any(not(windows), feature = "pac-engine"))]
 mod pac;
 mod platform;
 mod resolver;

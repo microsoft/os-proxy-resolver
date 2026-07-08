@@ -1,0 +1,14 @@
+{
+  "name": "electron-pac-bench",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Benchmark Chromium's built-in PAC resolver (via Electron) as a baseline for os-proxy-resolver's WinHTTP and embedded-QuickJS paths.",
+  "license": "MIT",
+  "main": "main.js",
+  "scripts": {
+    "bench": "electron ."
+  },
+  "devDependencies": {
+    "electron": "42.5.0"
+  }
+}

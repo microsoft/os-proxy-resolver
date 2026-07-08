@@ -74,12 +74,12 @@ jobs:
         run: cargo install cross --locked
 
       - name: Build
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --target ${{ matrix.target }} --all-features --examples
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --target ${{ matrix.target }} --features tokio --examples
         shell: bash
 
       - name: Test
         if: matrix.run_tests
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --all-features
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --features tokio
         shell: bash
 
       - name: Build proxytester (release)
@@ -150,10 +150,64 @@ jobs:
           OS_PROXY_RESOLVER_OS_TESTS: "1"
         run: |
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            dbus-run-session -- cargo test --all-features os_roundtrip -- --nocapture
+            dbus-run-session -- cargo test --features tokio os_roundtrip -- --nocapture
           else
-            cargo test --all-features os_roundtrip -- --nocapture
+            cargo test --features tokio os_roundtrip -- --nocapture
           fi
+        shell: bash
+
+  pac-bench:
+    name: WinHTTP vs QuickJS PAC benchmark (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+        shell: bash
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pac-bench
+
+      # The `pac-engine` feature additionally compiles the embedded QuickJS PAC
+      # engine on Windows (it is always built off Windows) so it can be timed
+      # against WinHTTP on the same PAC script. This is the only build that
+      # links QuickJS on Windows — production Windows stays WinHTTP-only / pure
+      # Rust. windows-latest ships the MSVC toolchain the QuickJS C sources need.
+      - name: Run WinHTTP vs QuickJS PAC benchmark
+        run: cargo run --release --example pac_bench --features pac-engine -- --iterations 3000
+        shell: bash
+
+  electron-pac-bench:
+    name: Electron (Chromium) PAC baseline (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # No lockfile is committed (Electron pulls a large platform binary), so
+      # install rather than `npm ci`.
+      - name: Install Electron
+        run: npm install --no-audit --no-fund
+        working-directory: bench/electron
+        shell: bash
+
+      # Baseline for the Rust pac_bench numbers above: Chromium's own V8 PAC
+      # resolver, which is what Electron uses by default (WinHTTP is only used
+      # with --use-system-proxy-resolver). Same built-in PAC and URLs.
+      # resolveProxy is an async IPC to the network service and is throughput-
+      # serialized: --concurrency 32 shows it barely lifts throughput (~1.2x),
+      # which is the evidence that the ~250-310 calls/s ceiling is async-IPC
+      # cost (plus Windows' ~15.6ms timer granularity), not PAC evaluation.
+      - name: Run Electron PAC baseline
+        run: npm run bench -- --iterations 3000 --concurrency 32
+        working-directory: bench/electron
         shell: bash
 
   lint:

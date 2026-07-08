@@ -19,6 +19,11 @@ crate-type = ["rlib", "cdylib"]
 default = []
 # Async change notification via tokio::sync::watch.
 tokio = ["dep:tokio"]
+# Also build the embedded QuickJS PAC engine on Windows (it is always built off
+# Windows). This is only for the `pac_bench` example, which compares WinHTTP
+# against the embedded engine — production Windows stays WinHTTP-only / pure
+# Rust, so this is deliberately *not* part of the default feature set.
+pac-engine = ["dep:rquickjs-sys"]
 
 [dependencies]
 url = "2"
@@ -44,6 +49,11 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
+# Optional on Windows so the default build stays pure Rust (WinHTTP handles
+# PAC). Enabled by the `pac-engine` feature for the WinHTTP-vs-QuickJS
+# benchmark. Off Windows the engine is always built (see the not(windows)
+# table above), where this crate is a required dependency.
+rquickjs-sys = { version = "0.12.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }

@@ -129,6 +129,15 @@ cargo run --example resolve -- --watch                # watch for changes
 cargo run --example proxytester -- --pac-script file.pac http://url/ # test a PAC file
 ```
 
+To compare the two PAC engines head-to-head — WinHTTP versus the embedded
+QuickJS engine — on the same script and URLs, run the `pac_bench` example. On
+Windows the QuickJS side is only built with the `pac-engine` feature (off
+Windows the engine is always built); production Windows builds never link it:
+
+```sh
+cargo run --release --example pac_bench --features pac-engine
+```
+
 Builds as both `rlib` and `cdylib`. Release automation with `cargo-dist` is a
 natural fit (the CI matrix below already covers the seven targets) but is not
 wired up yet.
@@ -137,7 +146,11 @@ wired up yet.
 
 GitHub Actions builds and tests: Windows x64 + arm64 (pure Rust), macOS x64 +
 arm64, Linux x86_64 (native), Linux aarch64 + armv7 (via `cross`, whose images
-ship the C cross-toolchain QuickJS needs).
+ship the C cross-toolchain QuickJS needs). Two Windows benchmark jobs establish
+the performance picture on the same runner: `pac_bench`
+(`--features pac-engine`) times WinHTTP against the embedded QuickJS engine, and
+[`bench/electron`](bench/electron) times Chromium's own V8 PAC resolver (what
+Electron uses by default) as the baseline.
 
 ## License
 
