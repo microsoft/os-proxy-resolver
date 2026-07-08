@@ -171,3 +171,35 @@ jobs:
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  licenses:
+    name: licenses (deny + notices)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny and cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-about
+      # Fail if any dependency carries a license outside deny.toml's allow-list.
+      - name: Check dependency licenses
+        run: cargo deny check licenses bans sources
+      # Fail if ThirdPartyNotices.txt is stale relative to the current graph.
+      # The comparison ignores blank-line and whitespace differences (-B -w):
+      # some crates ship multiple copies of the same license text differing only
+      # in whitespace (e.g. miniz_oxide's LICENSE vs LICENSE-MIT.md), and
+      # cargo-about picks whichever the filesystem lists first, which varies by
+      # OS. We only care that the license *content* matches, not its formatting.
+      - name: Verify ThirdPartyNotices.txt is up to date
+        run: |
+          cargo about generate --all-features about.hbs > ThirdPartyNotices.generated.txt
+          if ! diff -u -B -w ThirdPartyNotices.txt ThirdPartyNotices.generated.txt; then
+            echo "::error::ThirdPartyNotices.txt is out of date. Run: cargo about generate --all-features about.hbs > ThirdPartyNotices.txt"
+            exit 1
+          fi
+

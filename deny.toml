@@ -1,0 +1,54 @@
+# cargo-deny configuration.
+#
+# Run locally with:  cargo deny check
+# The `licenses` section is the important one here: it enforces that every
+# crate in the dependency graph uses a permissive license we've vetted, so a
+# future dependency carrying a copyleft or unknown license fails CI instead of
+# silently shipping in a statically linked binary.
+
+[graph]
+# Check dependencies for all the targets we actually build for. A crate that is
+# only pulled in on, say, Windows still needs an acceptable license.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "armv7-unknown-linux-gnueabihf",
+]
+all-features = true
+
+[licenses]
+# Every license below is permissive (attribution-only, no copyleft, no
+# source-disclosure obligation). Keep this list in sync with what actually
+# appears in the tree; adding a new one is a deliberate decision.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+# Crates must be at least this confident about their detected license.
+confidence-threshold = 0.9
+
+[bans]
+# Not the focus here, but warn on multiple versions of the same crate so we
+# notice dependency bloat. Duplicates are common and non-fatal.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[advisories]
+# Security advisories are handled here too; fail on anything unmaintained or
+# vulnerable so `cargo deny check` is a useful one-stop supply-chain gate.
+yanked = "deny"
+
+[sources]
+# Only crates.io is expected.
+unknown-registry = "deny"
+unknown-git = "deny"
