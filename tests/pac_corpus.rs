@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 //! pactester-style corpus: (pac file, url) -> expected proxy list. Catches
-//! drift in the vendored pacparser/QuickJS builtins cheaply.
+//! drift in the built-in QuickJS PAC engine builtins cheaply.
 
 #![cfg(not(windows))]
 

@@ -40,22 +40,23 @@
 //! | | config source | PAC/WPAD engine | change signal |
 //! |---|---|---|---|
 //! | Windows | `WinHttpGetIEProxyConfigForCurrentUser` | WinHTTP (`WinHttpGetProxyForUrl`, incl. DHCP+DNS WPAD) | registry notification |
-//! | macOS | `SCDynamicStoreCopyProxies` | vendored [pacparser] (QuickJS) + DNS WPAD | `SCDynamicStore` callback |
-//! | Linux | GNOME `org.gnome.system.proxy` (gsettings) | vendored [pacparser] (QuickJS) + DNS WPAD | `dconf watch` / `gsettings monitor` |
+//! | macOS | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
+//! | Linux | GNOME `org.gnome.system.proxy` (gsettings) | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
 //!
-//! On Windows no C engine is built or linked — PAC evaluation, DHCP and DNS
+//! On Windows no JS engine is built or linked — PAC evaluation, DHCP and DNS
 //! WPAD are all WinHTTP's. On macOS/Linux, DHCP-based WPAD (option 252) is a
 //! documented non-goal; DNS-based WPAD walks `wpad.<search-domain>` with
 //! tight timeouts.
 //!
 //! # The PAC cage
 //!
-//! A PAC file is untrusted JavaScript on a live JS engine, and pacparser has
-//! a single global, non-thread-safe context with synchronously-blocking DNS
-//! builtins. All pacparser calls are therefore serialized on one dedicated
-//! worker thread, every `FindProxyForURL` call has a hard timeout, URLs are
-//! stripped (identity always; path+query for https) before evaluation, and a
-//! wedged evaluator makes callers fail fast into the fallback path instead of
+//! A PAC file is untrusted JavaScript on a live JS engine. The embedded
+//! QuickJS context is neither `Send` nor `Sync` and has synchronously-blocking
+//! DNS builtins. All engine calls are therefore serialized on one dedicated
+//! worker thread, every `FindProxyForURL` call has a hard timeout (a runaway
+//! JS loop is interrupted inside the engine), URLs are stripped (identity
+//! always; path+query for https) before evaluation, and a worker stuck in a
+//! blocking builtin makes callers fail fast into the fallback path instead of
 //! queueing. The worker protocol is process-agnostic so the evaluator can
 //! later move out-of-process entirely (Chromium-style sandboxing).
 //!
@@ -73,7 +74,7 @@
 //! - With the `tokio` feature, [`ProxyResolver::watch`] additionally exposes
 //!   a `tokio::sync::watch::Receiver<u64>` for async consumers.
 //!
-//! [pacparser]: https://github.com/manugarg/pacparser
+//! [QuickJS]: https://github.com/quickjs-ng/quickjs
 
 mod bypass;
 mod env_cfg;

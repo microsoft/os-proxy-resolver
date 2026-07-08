@@ -6,34 +6,38 @@
 //! The caged PAC evaluator (macOS/Linux only — Windows delegates PAC to
 //! WinHTTP).
 //!
-//! pacparser has a single global, non-thread-safe context, and the PAC
-//! builtins `dnsResolve()` / `myIpAddress()` do synchronous network I/O. Both
-//! problems are contained the same way: one dedicated worker thread owns the
-//! context, all calls are serialized through a command channel, and every
+//! The embedded QuickJS engine ([`engine::PacEngine`]) wraps a QuickJS
+//! context that is neither `Send` nor `Sync`, and the PAC builtins
+//! `dnsResolve()` / `myIpAddress()` do synchronous network I/O. Both problems
+//! are contained the same way: one dedicated worker thread owns the engine,
+//! all calls are serialized through a command channel, and every
 //! `FindProxyForURL` call gets a hard timeout on the caller side.
 //!
-//! A PAC script is untrusted JS on a live engine. If a hostile script loops
-//! forever, the worker thread is wedged — it cannot be killed safely (the
-//! global C context would be corrupted). Instead, callers fail fast
-//! ([`Error::PacTimeout`]) while a request is outstanding past its deadline,
-//! and service resumes automatically if the worker ever completes. The
+//! A PAC script is untrusted JS on a live engine. A runaway JavaScript loop
+//! is interrupted inside the engine by its own deadline (see
+//! [`engine::PacEngine::set_timeout`]), so the worker recovers on its own.
+//! But a native builtin — most importantly a blocking DNS lookup — cannot be
+//! interrupted, so it can still exceed the caller's deadline. In that case
+//! callers fail fast ([`Error::PacTimeout`]) while a request is outstanding,
+//! and service resumes automatically once the worker completes. The
 //! command/reply protocol here is deliberately process-agnostic so the worker
 //! can be moved out-of-process later (Chromium-style: a subprocess you can
-//! resource-limit and kill), which is the real fix.
+//! resource-limit and kill).
 
-mod ffi;
+mod engine;
 
 use crate::types::{parse_pac_result, sanitize_url_for_pac, Error, ProxyKind, Result};
-use std::ffi::{CStr, CString};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-/// Handle to the process-global PAC worker. pacparser's context is a single
-/// global — one worker thread per *process*, shared by all resolvers, created
-/// lazily and never torn down. Only the timeout is per-handle.
+/// Handle to the process-global PAC worker. The QuickJS engine lives on a
+/// single dedicated worker thread — one per *process*, shared by all
+/// resolvers, created lazily and never torn down. Only the timeout is
+/// per-handle.
 pub(crate) struct PacEvaluator {
     timeout: Duration,
 }
@@ -140,24 +144,22 @@ impl PacEvaluator {
 }
 
 // ---------------------------------------------------------------------------
-// Worker thread: the only code allowed to touch pacparser.
+// Worker thread: the only code allowed to touch the QuickJS engine.
 
 struct WorkerState {
-    /// Script currently loaded into the global context, with the parse
-    /// outcome cached so a broken script doesn't get re-parsed per request.
+    /// The engine with the current script loaded. `None` until the first
+    /// successful load, and cleared whenever a (re)load fails.
+    engine: Option<engine::PacEngine>,
+    /// Script currently loaded, with the load outcome cached so a broken
+    /// script doesn't get re-parsed per request.
     current: Option<(Arc<str>, std::result::Result<(), String>)>,
-    initialized: bool,
     my_ip: Option<String>,
 }
 
 fn worker_loop(rx: mpsc::Receiver<EvalRequest>, shared: Arc<Shared>) {
-    unsafe {
-        ffi::ospr_install_error_printer();
-        ffi::pacparser_enable_microsoft_extensions();
-    }
     let mut state = WorkerState {
+        engine: None,
         current: None,
-        initialized: false,
         my_ip: None,
     };
     while let Ok(request) = rx.recv() {
@@ -166,71 +168,56 @@ fn worker_loop(rx: mpsc::Receiver<EvalRequest>, shared: Arc<Shared>) {
         // Receiver may have timed out and gone away; that's fine.
         let _ = request.reply.send(result);
     }
-    if state.initialized {
-        unsafe { ffi::pacparser_cleanup() };
-    }
 }
 
 fn eval_one(state: &mut WorkerState, request: &EvalRequest) -> Result<String> {
-    let needs_parse = match &state.current {
+    let needs_reload = match &state.current {
         Some((script, _)) => !same_script(script, &request.script),
         None => true,
     };
-    if needs_parse {
-        let outcome = parse_script(state, &request.script);
+    if needs_reload {
+        let outcome = load_script(state, &request.script);
         state.current = Some((request.script.clone(), outcome));
     }
     if let Some((_, Err(msg))) = &state.current {
         return Err(Error::PacEval(msg.clone()));
     }
 
+    let engine = state
+        .engine
+        .as_mut()
+        .expect("engine is present after a successful load");
+
+    // A fresh engine starts with OS-based `myIpAddress`; only touch the
+    // override when the requested value actually changes.
     if request.my_ip != state.my_ip {
-        if let Some(ip) = &request.my_ip {
-            if let Ok(c_ip) = CString::new(ip.as_str()) {
-                unsafe { ffi::pacparser_setmyip(c_ip.as_ptr()) };
-            }
-        }
+        let ip = request
+            .my_ip
+            .as_deref()
+            .and_then(|s| s.parse::<IpAddr>().ok());
+        engine.set_my_ip(ip);
         state.my_ip = request.my_ip.clone();
     }
 
-    let c_url =
-        CString::new(request.url.as_str()).map_err(|_| Error::InvalidUrl(request.url.clone()))?;
-    let c_host =
-        CString::new(request.host.as_str()).map_err(|_| Error::InvalidUrl(request.host.clone()))?;
-    unsafe {
-        ffi::ospr_clear_error();
-        let ptr = ffi::pacparser_find_proxy(c_url.as_ptr(), c_host.as_ptr());
-        if ptr.is_null() {
-            let msg = ffi::take_error();
-            return Err(Error::PacEval(if msg.is_empty() {
-                "FindProxyForURL returned no result".into()
-            } else {
-                msg
-            }));
-        }
-        // Library-owned; copy before the next pacparser call frees it.
-        Ok(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    match engine.find_proxy_ex(&request.url, &request.host) {
+        Ok(result) => Ok(result),
+        // A runaway JS loop is interrupted by the engine's own backstop
+        // deadline; surface it the same way as a caller-side timeout.
+        Err(engine::Error::Timeout) => Err(Error::PacTimeout),
+        Err(e) => Err(Error::PacEval(e.to_string())),
     }
 }
 
-fn parse_script(state: &mut WorkerState, script: &str) -> std::result::Result<(), String> {
-    unsafe {
-        if state.initialized {
-            ffi::pacparser_cleanup();
-            state.initialized = false;
-            state.my_ip = None;
-        }
-        ffi::ospr_clear_error();
-        if ffi::pacparser_init() != 1 {
-            return Err(format!("pacparser_init failed: {}", ffi::take_error()));
-        }
-        state.initialized = true;
-        let c_script = CString::new(script).map_err(|_| "PAC script contains NUL".to_string())?;
-        if ffi::pacparser_parse_pac_string(c_script.as_ptr()) != 1 {
-            return Err(format!("PAC parse failed: {}", ffi::take_error()));
-        }
-        Ok(())
-    }
+/// Builds a fresh engine for `script` (discarding any previous one, so a new
+/// script never inherits stale globals) and loads it.
+fn load_script(state: &mut WorkerState, script: &str) -> std::result::Result<(), String> {
+    // Drop the old engine first so only one runtime exists at a time.
+    state.engine = None;
+    state.my_ip = None;
+    let mut engine = engine::PacEngine::new().map_err(|e| e.to_string())?;
+    engine.load(script).map_err(|e| e.to_string())?;
+    state.engine = Some(engine);
+    Ok(())
 }
 
 fn same_script(a: &Arc<str>, b: &Arc<str>) -> bool {
