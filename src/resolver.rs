@@ -235,9 +235,9 @@ impl ProxyResolver {
     ///
     /// `source` may be a local filesystem path, a `file://` URL, or an
     /// `http(s)://` URL. Off Windows the script is read (or fetched) and run on
-    /// the vendored engine. On Windows evaluation is delegated to WinHTTP,
+    /// the built-in engine. On Windows evaluation is delegated to WinHTTP,
     /// which only loads PAC over `http(s)`; a local path / `file://` URL is
-    /// therefore rejected there (serve it over http instead — the `pactester`
+    /// therefore rejected there (serve it over http instead — the `proxytester`
     /// example does this for you).
     #[cfg(not(windows))]
     pub fn evaluate_pac_source(&self, source: &str, url: &Url) -> Result<Vec<ProxyKind>> {
@@ -449,7 +449,7 @@ impl ProxyResolver {
         self.eval_for_resolution(&script, url)
     }
 
-    /// Best-effort local IP for PAC `myIpAddress()`, so pacparser doesn't
+    /// Best-effort local IP for PAC `myIpAddress()`, so the engine doesn't
     /// fall back to resolving the hostname (slow, often wrong on multi-homed
     /// machines). A connected UDP socket never sends a packet.
     #[cfg(not(windows))]
@@ -604,8 +604,8 @@ mod tests {
     }
 
     // Serves a PAC over http and evaluates it via the public API. Exercises the
-    // real engine on every platform (pacparser off Windows, WinHTTP on it),
-    // which is also the path the `pactester` example drives.
+    // real engine on every platform (the built-in QuickJS engine off Windows,
+    // WinHTTP on it), which is also the path the `proxytester` example drives.
     #[test]
     fn evaluate_pac_source_over_http() {
         use std::io::{Read, Write};
@@ -639,8 +639,8 @@ mod tests {
             .evaluate_pac_source(&pac_url, &url("https://x.com/"))
             .unwrap();
 
-        // WinHTTP drops a trailing DIRECT; pacparser keeps it. Both agree on
-        // the primary proxy.
+        // WinHTTP drops a trailing DIRECT; the built-in engine keeps it. Both
+        // agree on the primary proxy.
         assert_eq!(got.first(), Some(&ProxyKind::Http("p:1".into())));
     }
 }

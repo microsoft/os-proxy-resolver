@@ -22,7 +22,7 @@ SOFTWARE.
 
 ---
 
-This product bundles pacparser (in vendor/pacparser), which is licensed under
-the GNU Lesser General Public License, version 3. See vendor/pacparser/COPYING
-for the full license text. The MIT license above applies only to the
-first-party source of this project, not to the bundled pacparser library.
+The embedded PAC engine (in src/pac/engine) links the QuickJS-NG JavaScript
+engine on macOS and Linux via the MIT-licensed rquickjs-sys crate. QuickJS-NG
+is also MIT-licensed. See ThirdPartyNotices.txt for details. The MIT license
+above applies to the first-party source of this project.

@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows: pure Rust — no C toolchain, no pacparser/QuickJS.
+          # Windows: pure Rust — no C toolchain, no QuickJS.
           - name: windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -26,7 +26,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             run_tests: true
 
-          # macOS: native runners provide the C toolchain for pacparser.
+          # macOS: native runners provide the C toolchain for QuickJS.
           - name: macos arm64
             os: macos-latest
             target: aarch64-apple-darwin
@@ -43,7 +43,7 @@ jobs:
             run_tests: true
 
           # Linux ARM: cross — its images ship the C cross-toolchain
-          # pacparser needs, and run tests under qemu.
+          # QuickJS needs, and run tests under qemu.
           - name: linux aarch64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
@@ -57,8 +57,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install Rust
         run: |
@@ -84,40 +82,28 @@ jobs:
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --all-features
         shell: bash
 
-      - name: Build pactester (release)
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --example pactester
+      - name: Build proxytester (release)
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --example proxytester
         shell: bash
 
-      - name: Stage pactester artifact
+      - name: Stage proxytester artifact
         run: |
           ext=""
-          lib=""
           case "${{ matrix.target }}" in
-            *windows*)        ext=".exe" ;;
-            *darwin*|*apple*) lib="libpacparser.dylib" ;;
-            *)                lib="libpacparser.so" ;;
+            *windows*) ext=".exe" ;;
           esac
-          stage="dist/pactester-${{ matrix.target }}"
+          stage="dist/proxytester-${{ matrix.target }}"
           mkdir -p "$stage"
-          cp "target/${{ matrix.target }}/release/examples/pactester${ext}" "$stage/"
-          # On macOS/Linux pactester links libpacparser dynamically; ship it
-          # right next to the binary so the @loader_path / $ORIGIN rpath finds
-          # it (WinHTTP handles PAC on Windows, so there's no dylib there).
-          if [ -n "$lib" ]; then
-            found=$(find "target/${{ matrix.target }}/release/build" -name "$lib" | head -n1)
-            if [ -z "$found" ]; then
-              echo "::error::could not find $lib to bundle"
-              exit 1
-            fi
-            cp "$found" "$stage/"
-          fi
+          # QuickJS is statically linked into the binary, so proxytester is
+          # self-contained (WinHTTP handles PAC on Windows).
+          cp "target/${{ matrix.target }}/release/examples/proxytester${ext}" "$stage/"
         shell: bash
 
-      - name: Upload pactester artifact
+      - name: Upload proxytester artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pactester-${{ matrix.target }}
-          path: dist/pactester-${{ matrix.target }}/
+          name: proxytester-${{ matrix.target }}
+          path: dist/proxytester-${{ matrix.target }}/
           if-no-files-found: error
 
   os-config-tests:
@@ -135,8 +121,6 @@ jobs:
             os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install Rust
         run: |
@@ -177,8 +161,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update

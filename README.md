@@ -38,28 +38,32 @@ resolution.
 | | config source | PAC + WPAD | change signal |
 |---|---|---|---|
 | **Windows** | `WinHttpGetIEProxyConfigForCurrentUser` | WinHTTP `WinHttpGetProxyForUrl` (PAC eval + DHCP/DNS WPAD in the OS) | registry change notification |
-| **macOS** | `SCDynamicStoreCopyProxies` | vendored [pacparser] (QuickJS) + DNS WPAD | `SCDynamicStore` callback |
-| **Linux** | GNOME `org.gnome.system.proxy` via `gsettings` | vendored [pacparser] (QuickJS) + DNS WPAD | `dconf watch` / `gsettings monitor` |
+| **macOS** | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
+| **Linux** | GNOME `org.gnome.system.proxy` via `gsettings` | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
 
-Windows builds are **pure Rust** — pacparser/QuickJS are neither compiled nor
-linked there. On macOS/Linux the vendored C sources (two files:
-`pacparser.c` + the QuickJS-NG amalgam) are compiled directly by `build.rs`
-via the `cc` crate; no autotools/make, which keeps cross-compilation clean.
+Windows builds are **pure Rust** — the QuickJS PAC engine is neither compiled
+nor linked there. On macOS/Linux the PAC engine embeds QuickJS-NG via the
+MIT-licensed `rquickjs-sys` crate (which compiles the QuickJS-NG C sources);
+no autotools/make, which keeps cross-compilation clean. The PAC helper
+functions are first-party JavaScript implemented from the public PAC
+specification.
 
 Non-goals: DHCP-based WPAD (option 252) on macOS/Linux (Windows gets it via
 WinHTTP), KDE proxy settings, proxy authentication credentials.
 
 ## The PAC cage
 
-A PAC file is untrusted JavaScript running on a live JS engine, and pacparser
-has a single global, non-thread-safe context whose `dnsResolve()` /
+A PAC file is untrusted JavaScript running on a live JS engine. The embedded
+QuickJS context is neither `Send` nor `Sync`, and its `dnsResolve()` /
 `myIpAddress()` builtins block on real network I/O. Containment:
 
-- **One process-global worker thread** owns the pacparser context; every
-  init/parse/find_proxy is serialized through a command channel.
-- **Hard timeout** on every `FindProxyForURL` call. A wedged evaluator (e.g.
-  an infinite JS loop) makes subsequent calls fail fast into the fallback
-  path instead of queueing; service resumes if the worker ever recovers.
+- **One process-global worker thread** owns the PAC engine; every
+  parse/find_proxy is serialized through a command channel.
+- **Hard timeout** on every `FindProxyForURL` call. A runaway JS loop is
+  interrupted inside the engine by its own deadline; a blocking native
+  builtin (e.g. slow DNS) that outlasts the caller's deadline makes
+  subsequent calls fail fast into the fallback path instead of queueing,
+  and service resumes once the worker recovers.
 - **URL sanitization** before evaluation (Chromium-style): identity is always
   stripped; for https URLs the path and query are dropped, so a hostile
   PAC/WPAD author can't read request details.
@@ -112,7 +116,7 @@ is returned and retried.
 ## Building
 
 ```sh
-git clone --recurse-submodules <repo>   # pacparser is a git submodule
+git clone <repo>
 cargo build                             # needs a C compiler on macOS/Linux only
 cargo test
 ```
@@ -122,7 +126,7 @@ Examples:
 ```sh
 cargo run --example resolve -- https://example.com/   # live OS config
 cargo run --example resolve -- --watch                # watch for changes
-cargo run --example pactester -- file.pac http://url/ # macOS/Linux
+cargo run --example proxytester -- --pac-script file.pac http://url/ # test a PAC file
 ```
 
 Builds as both `rlib` and `cdylib`. Release automation with `cargo-dist` is a
@@ -133,17 +137,17 @@ wired up yet.
 
 GitHub Actions builds and tests: Windows x64 + arm64 (pure Rust), macOS x64 +
 arm64, Linux x86_64 (native), Linux aarch64 + armv7 (via `cross`, whose images
-ship the C cross-toolchain pacparser needs).
+ship the C cross-toolchain QuickJS needs).
 
 ## License
 
 The first-party code in this repository is licensed under the [MIT License](LICENSE.txt),
 Copyright (c) Microsoft Corporation.
 
-The bundled [pacparser] submodule is LGPL-3.0 and embeds QuickJS-NG (MIT); the
-compiled library on macOS/Linux statically links both, so the resulting binary
-is a combined work governed by `MIT AND LGPL-3.0-or-later` — check that this
-suits your distribution model (in particular the LGPL relinking obligation).
-Windows binaries contain neither pacparser nor QuickJS.
+On macOS/Linux the built-in PAC engine embeds QuickJS-NG (MIT) via the
+MIT-licensed `rquickjs-sys` crate, statically linked into the compiled library;
+the PAC helper functions are first-party JavaScript implemented from the public
+PAC specification. Everything is permissively licensed. Windows binaries
+contain no JavaScript engine at all (WinHTTP handles PAC).
 
-[pacparser]: https://github.com/manugarg/pacparser
+[QuickJS]: https://github.com/quickjs-ng/quickjs

@@ -3,8 +3,8 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! pactester-style corpus: (pac file, url) -> expected proxy list. Catches
-//! drift in the vendored pacparser/QuickJS builtins cheaply.
+//! proxytester-style corpus: (pac file, url) -> expected proxy list. Catches
+//! drift in the built-in QuickJS PAC engine builtins cheaply.
 
 #![cfg(not(windows))]
 
