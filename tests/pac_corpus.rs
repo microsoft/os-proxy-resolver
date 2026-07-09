@@ -4,18 +4,49 @@
  *--------------------------------------------------------------------------------------------*/
 
 //! proxytester-style corpus: (pac file, url) -> expected proxy list. Catches
-//! drift in the built-in QuickJS PAC engine builtins cheaply.
+//! drift in the built-in PAC engine builtins cheaply. Runs against every
+//! compiled-in backend — the native engine and (with the
+//! `pac-engine-wasmtime` feature) the sandboxed Wasmtime engine, which must
+//! agree on every case.
 
-#![cfg(not(windows))]
+#![cfg(any(not(windows), feature = "pac-engine"))]
 
-use os_proxy_resolver::{ProxyKind, ProxyResolver};
+use os_proxy_resolver::{PacBackendKind, ProxyKind, ProxyResolver, ResolverOptions};
+use std::sync::OnceLock;
 
-fn eval(pac_file: &str, url: &str) -> Vec<ProxyKind> {
+fn resolver_for(kind: PacBackendKind) -> ProxyResolver {
+    let mut options = ResolverOptions::default();
+    options.pac_backend = kind;
+    ProxyResolver::with_options(options)
+}
+
+/// One resolver per compiled-in backend; process-wide like the engines'
+/// worker threads.
+fn resolvers() -> Vec<(PacBackendKind, &'static ProxyResolver)> {
+    static NATIVE: OnceLock<ProxyResolver> = OnceLock::new();
+    let mut resolvers = vec![(
+        PacBackendKind::Native,
+        NATIVE.get_or_init(|| resolver_for(PacBackendKind::Native)),
+    )];
+    #[cfg(feature = "pac-engine-wasmtime")]
+    {
+        static WASMTIME: OnceLock<ProxyResolver> = OnceLock::new();
+        resolvers.push((
+            PacBackendKind::Wasmtime,
+            WASMTIME.get_or_init(|| resolver_for(PacBackendKind::Wasmtime)),
+        ));
+    }
+    resolvers
+}
+
+fn check(pac_file: &str, url: &str, expected: &[ProxyKind]) {
     let path = format!("{}/tests/data/{pac_file}", env!("CARGO_MANIFEST_DIR"));
     let script = std::fs::read_to_string(path).unwrap();
-    ProxyResolver::global()
-        .evaluate_pac(&script, &url::Url::parse(url).unwrap())
-        .unwrap()
+    let parsed = url::Url::parse(url).unwrap();
+    for (kind, resolver) in resolvers() {
+        let got = resolver.evaluate_pac(&script, &parsed).unwrap();
+        assert_eq!(got, expected, "url: {url}, backend: {kind:?}");
+    }
 }
 
 fn http(hp: &str) -> ProxyKind {
@@ -50,28 +81,31 @@ fn corporate_pac_corpus() {
         ),
     ];
     for (url, expected) in cases {
-        assert_eq!(&eval("corporate.pac", url), expected, "url: {url}");
+        check("corporate.pac", url, expected);
     }
 }
 
 #[test]
 fn socks_chain_corpus() {
-    assert_eq!(
-        eval("socks_chain.pac", "http://always-direct.example/"),
-        vec![ProxyKind::Direct]
+    check(
+        "socks_chain.pac",
+        "http://always-direct.example/",
+        &[ProxyKind::Direct],
     );
     // Default ports are filled in for portless entries.
-    assert_eq!(
-        eval("socks_chain.pac", "http://no-port.example/"),
-        vec![http("noport:80"), socks("nosocks:1080")]
+    check(
+        "socks_chain.pac",
+        "http://no-port.example/",
+        &[http("noport:80"), socks("nosocks:1080")],
     );
-    assert_eq!(
-        eval("socks_chain.pac", "http://other.example/"),
-        vec![
+    check(
+        "socks_chain.pac",
+        "http://other.example/",
+        &[
             socks("socks.example.com:1080"),
             socks("legacy.example.com:1080"),
             ProxyKind::Direct,
-        ]
+        ],
     );
 }
 
@@ -79,11 +113,12 @@ fn socks_chain_corpus() {
 fn microsoft_extensions_take_precedence() {
     // The HTTPS token means "TLS to the proxy itself" and is carried in the
     // Http entry as a https:// prefix.
-    assert_eq!(
-        eval("ms_extensions.pac", "http://x.example/"),
-        vec![
+    check(
+        "ms_extensions.pac",
+        "http://x.example/",
+        &[
             http("https://tls-proxy.example.com:8443"),
-            ProxyKind::Direct
-        ]
+            ProxyKind::Direct,
+        ],
     );
 }

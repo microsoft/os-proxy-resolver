@@ -70,6 +70,22 @@ QuickJS context is neither `Send` nor `Sync`, and its `dnsResolve()` /
 - The worker protocol is process-agnostic by design, so the evaluator can
   later be moved out-of-process entirely (subprocess with resource limits you
   can kill) — the Chromium end-state.
+- **Optional WebAssembly containment** (`--features pac-engine-wasmtime`, any
+  platform): the same QuickJS-NG, compiled to wasm32-wasip1 (see
+  [`pac-wasm-guest/`](pac-wasm-guest)) and run under Wasmtime, selected per
+  resolver with `ResolverOptions::pac_backend`. A memory-safety bug in the C
+  engine triggered by a hostile PAC then corrupts the guest's linear memory
+  instead of host memory, and the script's only reach into the process is the
+  DNS/local-IP/log callbacks — no filesystem, network, environment, or other
+  WASI capability exists inside the sandbox. Wasmtime runs in **AOT mode
+  only**: build.rs precompiles the vendored guest module (Cranelift runs at
+  build time as a build-dependency), the runtime dependency contains no
+  JIT/compiler at all, and only `Module::deserialize` of that trusted
+  first-party artifact happens at runtime. Runaway scripts are stopped by
+  epoch interruption; memory is capped both by QuickJS's own 64 MiB limit
+  inside the guest and a cap on the wasm linear memory. This backend is
+  opt-in and not the default while the two engines are benchmarked against
+  each other (see CI below).
 
 WPAD discovery is aggressive about not stalling: `wpad.<search-domain>` DNS
 probes get ~300ms each (walking up the domain, never into a TLD), the
@@ -129,14 +145,20 @@ cargo run --example resolve -- --watch                # watch for changes
 cargo run --example proxytester -- --pac-script file.pac http://url/ # test a PAC file
 ```
 
-To compare the two PAC engines head-to-head — WinHTTP versus the embedded
-QuickJS engine — on the same script and URLs, run the `pac_bench` example. On
-Windows the QuickJS side is only built with the `pac-engine` feature (off
-Windows the engine is always built); production Windows builds never link it:
+To compare the PAC engines head-to-head — WinHTTP (Windows), the embedded
+native QuickJS engine, and the sandboxed Wasmtime engine — on the same script
+and URLs, run the `pac_bench` example. On Windows the QuickJS side is only
+built with the `pac-engine` feature (off Windows the engine is always built);
+production Windows builds never link it. The Wasmtime backend is opt-in
+everywhere via `pac-engine-wasmtime`:
 
 ```sh
-cargo run --release --example pac_bench --features pac-engine
+cargo run --release --example pac_bench --features "pac-engine pac-engine-wasmtime"
 ```
+
+The benchmark cross-checks all engines and fails if the native and Wasmtime
+backends (byte-identical engine sources) disagree on any URL; it also reports
+the size of the embedded AOT-compiled guest module.
 
 Builds as both `rlib` and `cdylib`. Release automation with `cargo-dist` is a
 natural fit (the CI matrix below already covers the seven targets) but is not
@@ -146,11 +168,14 @@ wired up yet.
 
 GitHub Actions builds and tests: Windows x64 + arm64 (pure Rust), macOS x64 +
 arm64, Linux x86_64 (native), Linux aarch64 + armv7 (via `cross`, whose images
-ship the C cross-toolchain QuickJS needs). Two Windows benchmark jobs establish
-the performance picture on the same runner: `pac_bench`
-(`--features pac-engine`) times WinHTTP against the embedded QuickJS engine, and
-[`bench/electron`](bench/electron) times Chromium's own V8 PAC resolver (what
-Electron uses by default) as the baseline.
+ship the C cross-toolchain QuickJS needs). Two benchmark jobs run on
+**Windows, macOS, and Linux** to establish the performance picture per OS:
+`pac_bench` (`--features "pac-engine pac-engine-wasmtime"`) times every engine
+available on that OS (WinHTTP + native + Wasmtime on Windows; native +
+Wasmtime elsewhere) and reports the binary-size delta of the Wasmtime backend,
+and [`bench/electron`](bench/electron) times Chromium's own V8 PAC resolver
+(what Electron uses by default) as the baseline next to the in-process
+numbers.
 
 ## License
 
@@ -161,6 +186,9 @@ On macOS/Linux the built-in PAC engine embeds QuickJS-NG (MIT) via the
 MIT-licensed `rquickjs-sys` crate, statically linked into the compiled library;
 the PAC helper functions are first-party JavaScript implemented from the public
 PAC specification. Everything is permissively licensed. Windows binaries
-contain no JavaScript engine at all (WinHTTP handles PAC).
+contain no JavaScript engine at all (WinHTTP handles PAC). The optional
+`pac-engine-wasmtime` feature additionally embeds the Apache-2.0 (with LLVM
+exception) licensed Wasmtime runtime and a wasm build of QuickJS-NG (via the
+Apache-2.0-licensed Javy crate).
 
 [QuickJS]: https://github.com/quickjs-ng/quickjs

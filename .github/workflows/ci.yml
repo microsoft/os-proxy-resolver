@@ -157,8 +157,26 @@ jobs:
         shell: bash
 
   pac-bench:
-    name: WinHTTP vs QuickJS PAC benchmark (windows)
-    runs-on: windows-latest
+    name: PAC benchmark (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows times three engines: WinHTTP + native QuickJS + Wasmtime.
+          # The `pac-engine` feature additionally compiles the embedded QuickJS
+          # PAC engine on Windows (it is always built off Windows) — this is
+          # the only build that links QuickJS on Windows; production Windows
+          # stays WinHTTP-only / pure Rust.
+          - name: windows
+            os: windows-latest
+          # macOS/Linux time two engines: native QuickJS + Wasmtime
+          # (`pac-engine` is a no-op off Windows). The native runners provide
+          # the C toolchain the QuickJS sources need.
+          - name: macos
+            os: macos-latest
+          - name: linux
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -170,20 +188,54 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: pac-bench
+          key: pac-bench-${{ matrix.name }}
 
-      # The `pac-engine` feature additionally compiles the embedded QuickJS PAC
-      # engine on Windows (it is always built off Windows) so it can be timed
-      # against WinHTTP on the same PAC script. This is the only build that
-      # links QuickJS on Windows — production Windows stays WinHTTP-only / pure
-      # Rust. windows-latest ships the MSVC toolchain the QuickJS C sources need.
-      - name: Run WinHTTP vs QuickJS PAC benchmark
-        run: cargo run --release --example pac_bench --features pac-engine -- --iterations 3000
+      # Baseline build without the Wasmtime backend, to measure the
+      # binary-size delta the `pac-engine-wasmtime` feature contributes.
+      - name: Build pac_bench (without wasmtime backend)
+        run: |
+          cargo build --release --example pac_bench --features pac-engine
+          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          echo "PAC_BENCH_BASE_SIZE=$(wc -c < target/release/examples/pac_bench$ext | tr -d ' ')" >> "$GITHUB_ENV"
+        shell: bash
+
+      # Correctness first: the full test suite against both embedded engines
+      # (unit tests + PAC corpus + hostile-PAC timeout, each parametrized over
+      # the native and Wasmtime backends).
+      - name: Test both embedded PAC backends
+        run: cargo test --release --features "pac-engine pac-engine-wasmtime"
+        shell: bash
+
+      # Time every engine available on this OS on the same PAC script and
+      # URLs (WinHTTP on Windows only). pac_bench exits non-zero if the native
+      # and Wasmtime backends — which run byte-identical engine sources —
+      # disagree on any URL.
+      - name: Run PAC benchmark
+        run: cargo run --release --example pac_bench --features "pac-engine pac-engine-wasmtime" -- --iterations 3000
+        shell: bash
+
+      - name: Report wasmtime backend binary-size delta
+        run: |
+          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          full=$(wc -c < target/release/examples/pac_bench$ext | tr -d ' ')
+          echo "pac_bench (pac-engine only)          : $PAC_BENCH_BASE_SIZE bytes"
+          echo "pac_bench (+ pac-engine-wasmtime)    : $full bytes"
+          echo "wasmtime backend binary-size delta   : $((full - PAC_BENCH_BASE_SIZE)) bytes"
         shell: bash
 
   electron-pac-bench:
-    name: Electron (Chromium) PAC baseline (windows)
-    runs-on: windows-latest
+    name: Electron (Chromium) PAC baseline (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+          - name: macos
+            os: macos-latest
+          - name: linux
+            os: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -198,15 +250,24 @@ jobs:
         working-directory: bench/electron
         shell: bash
 
-      # Baseline for the Rust pac_bench numbers above: Chromium's own V8 PAC
-      # resolver, which is what Electron uses by default (WinHTTP is only used
-      # with --use-system-proxy-resolver). Same built-in PAC and URLs.
+      # Baseline for the Rust pac_bench numbers above, on every OS pac_bench
+      # runs on: Chromium's own V8 PAC resolver, which is what Electron uses
+      # by default (the OS resolver is only used with
+      # --use-system-proxy-resolver). Same built-in PAC and URLs.
       # resolveProxy is an async IPC to the network service and is throughput-
       # serialized: --concurrency 32 shows it barely lifts throughput (~1.2x),
-      # which is the evidence that the ~250-310 calls/s ceiling is async-IPC
-      # cost (plus Windows' ~15.6ms timer granularity), not PAC evaluation.
+      # which is the evidence that the calls/s ceiling is async-IPC cost (plus
+      # timer granularity, ~15.6ms on Windows), not PAC evaluation. The Linux
+      # runner is headless, so Electron needs a virtual display (xvfb) and its
+      # sandbox disabled (no setuid helper on the runner image).
       - name: Run Electron PAC baseline
-        run: npm run bench -- --iterations 3000 --concurrency 32
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            export ELECTRON_DISABLE_SANDBOX=1
+            xvfb-run --auto-servernum npm run bench -- --iterations 3000 --concurrency 32
+          else
+            npm run bench -- --iterations 3000 --concurrency 32
+          fi
         working-directory: bench/electron
         shell: bash
 

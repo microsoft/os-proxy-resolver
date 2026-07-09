@@ -3,38 +3,43 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! Benchmark the two PAC evaluation paths against each other:
+//! Benchmark every available PAC evaluation path against the others on the
+//! same PAC script and URLs:
 //!
-//! * **system** — [`ProxyResolver::evaluate_pac_source`], which on Windows is
-//!   WinHTTP (`WinHttpGetProxyForUrl`) and off Windows is the embedded engine
-//!   fed by an HTTP fetch.
-//! * **quickjs** — [`ProxyResolver::evaluate_pac`], the embedded QuickJS
-//!   engine evaluated directly from the script text.
+//! * **system** (Windows only) — [`ProxyResolver::evaluate_pac_source`], i.e.
+//!   WinHTTP (`WinHttpGetProxyForUrl`). Off Windows that API uses the same
+//!   embedded engine as `native`, so it is not timed separately there.
+//! * **native** — [`ProxyResolver::evaluate_pac`] with the default backend:
+//!   the in-process QuickJS-NG engine. Always built off Windows; on Windows
+//!   only with `--features pac-engine`.
+//! * **wasmtime** — the same QuickJS-NG compiled to WebAssembly and run in a
+//!   Wasmtime sandbox (`--features pac-engine-wasmtime`, any platform),
+//!   selected via [`ResolverOptions::pac_backend`].
 //!
-//! The interesting comparison is **on Windows**, where the two paths are two
-//! genuinely different engines (WinHTTP vs QuickJS). That is why this example
-//! only builds the QuickJS side on Windows behind `--features pac-engine`
-//! (off Windows the engine is always built). Off Windows both paths are the
-//! same QuickJS engine, so the numbers only exercise the harness.
+//! `native` and `wasmtime` run byte-identical engine + helper sources, so the
+//! cross-check requires them to agree **exactly** on every URL and the
+//! process exits non-zero on any diff. WinHTTP is allowed to differ (it e.g.
+//! drops a trailing DIRECT); its diffs are reported but not fatal.
 //!
 //! ```text
-//! cargo run --release --example pac_bench --features pac-engine
+//! cargo run --release --example pac_bench --features "pac-engine pac-engine-wasmtime"
 //! cargo run --release --example pac_bench --features pac-engine -- \
 //!     --iterations 5000 --pac-script my.pac https://a.example/ http://b.corp/
 //! ```
 //!
-//! The same PAC script is served from an ephemeral `127.0.0.1` HTTP endpoint
-//! (WinHTTP only loads PAC over http(s)) and also handed to the QuickJS engine
-//! as text, so both evaluate identical input.
+//! On Windows the PAC script is additionally served from an ephemeral
+//! `127.0.0.1` HTTP endpoint (WinHTTP only loads PAC over http(s)); all
+//! engines still evaluate identical input.
 
+#[cfg(any(not(windows), feature = "pac-engine"))]
+use os_proxy_resolver::{PacBackendKind, ResolverOptions};
 use os_proxy_resolver::{ProxyKind, ProxyResolver};
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::time::{Duration, Instant};
 use url::Url;
 
 /// A small but non-trivial PAC script: a few helper calls and branches so the
 /// measurement reflects real evaluation cost rather than a bare `return`.
+/// Keep this identical to DEFAULT_PAC in bench/electron/main.js.
 const DEFAULT_PAC: &str = r#"
 function FindProxyForURL(url, host) {
     if (isPlainHostName(host) ||
@@ -53,6 +58,7 @@ function FindProxyForURL(url, host) {
 }
 "#;
 
+/// Keep this identical to DEFAULT_URLS in bench/electron/main.js.
 const DEFAULT_URLS: &[&str] = &[
     "http://plainhost/",
     "https://db.corp.example.com/",
@@ -108,6 +114,69 @@ fn parse_args() -> Args {
     }
 }
 
+/// One PAC evaluation as run by a backend.
+type EvalFn = Box<dyn Fn(&Url) -> Result<Vec<ProxyKind>, String>>;
+
+/// One benchmarked evaluation path.
+struct Backend {
+    label: &'static str,
+    /// Backends flagged `exact` must agree with each other byte-for-byte
+    /// (they run the same engine sources); a diff is a bug and fails the run.
+    exact: bool,
+    call: EvalFn,
+}
+
+/// Assembles every path compiled into this build.
+fn backends(script: &str) -> Vec<Backend> {
+    let mut backends: Vec<Backend> = Vec::new();
+
+    // WinHTTP: only meaningful on Windows (off Windows evaluate_pac_source
+    // uses the same embedded engine as the `native` entry below).
+    #[cfg(windows)]
+    {
+        let resolver = ProxyResolver::new();
+        let pac_url = serve_pac(script.to_string());
+        println!("  winhttp    : PAC served at {pac_url}");
+        backends.push(Backend {
+            label: "winhttp",
+            exact: false,
+            call: Box::new(move |u| {
+                resolver
+                    .evaluate_pac_source(&pac_url, u)
+                    .map_err(|e| e.to_string())
+            }),
+        });
+    }
+
+    #[cfg(any(not(windows), feature = "pac-engine"))]
+    {
+        let mut options = ResolverOptions::default();
+        options.pac_backend = PacBackendKind::Native;
+        let resolver = ProxyResolver::with_options(options);
+        let script = script.to_string();
+        backends.push(Backend {
+            label: "native",
+            exact: true,
+            call: Box::new(move |u| resolver.evaluate_pac(&script, u).map_err(|e| e.to_string())),
+        });
+    }
+
+    #[cfg(feature = "pac-engine-wasmtime")]
+    {
+        let mut options = ResolverOptions::default();
+        options.pac_backend = PacBackendKind::Wasmtime;
+        let resolver = ProxyResolver::with_options(options);
+        let script = script.to_string();
+        backends.push(Backend {
+            label: "wasmtime",
+            exact: true,
+            call: Box::new(move |u| resolver.evaluate_pac(&script, u).map_err(|e| e.to_string())),
+        });
+    }
+
+    backends
+}
+
 fn main() {
     let args = parse_args();
 
@@ -134,9 +203,6 @@ fn main() {
         })
         .collect();
 
-    let resolver = ProxyResolver::new();
-    let pac_url = serve_pac(script.clone());
-
     println!("PAC benchmark");
     println!(
         "  iterations : {} per engine (across {} URLs)",
@@ -147,97 +213,93 @@ fn main() {
         "  pac source : {}",
         args.pac_script.as_deref().unwrap_or("<built-in>")
     );
-    println!("  served at  : {pac_url}");
-    if cfg!(windows) {
-        println!("  platform   : windows (system = WinHTTP, quickjs = embedded)");
-    } else {
-        println!("  platform   : non-windows (both paths use the embedded engine)");
-    }
+    let backends = backends(&script);
+    println!(
+        "  backends   : {}",
+        backends
+            .iter()
+            .map(|b| b.label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    report_binary_size();
     println!();
 
-    // Cross-check the two engines on each URL before timing, so divergences
-    // (e.g. WinHTTP dropping a trailing DIRECT) are reported up front.
-    cross_check(&resolver, &pac_url, &script, &urls);
+    if backends.is_empty() {
+        println!(
+            "no PAC backend compiled in — build with `--features pac-engine` \
+             (and/or `pac-engine-wasmtime`)."
+        );
+        return;
+    }
 
-    let system = bench("system", args.iterations, &urls, |u| {
-        resolver
-            .evaluate_pac_source(&pac_url, u)
-            .map_err(|e| e.to_string())
-    });
-    system.print();
+    // Cross-check all backends on each URL before timing, so divergences
+    // (e.g. WinHTTP dropping a trailing DIRECT) are reported up front. The
+    // `exact` backends (native, wasmtime) run byte-identical engine sources
+    // and MUST agree; anything else is a bug in the wasm backend.
+    let exact_diffs = cross_check(&backends, &urls);
 
-    match bench_quickjs(&resolver, &script, args.iterations, &urls) {
-        Some(quickjs) => {
-            quickjs.print();
-            compare(&system, &quickjs);
-        }
-        None => {
-            println!();
-            println!(
-                "quickjs : not compiled in on this build — rebuild with \
-                 `--features pac-engine` on Windows to compare against WinHTTP."
-            );
-        }
+    let mut stats: Vec<Stats> = Vec::new();
+    for backend in &backends {
+        let s = bench(backend.label, args.iterations, &urls, &backend.call);
+        s.print();
+        stats.push(s);
+    }
+    compare(&stats);
+
+    if exact_diffs > 0 {
+        eprintln!();
+        eprintln!(
+            "error: native and wasmtime backends diverged on {exact_diffs} URL(s) — \
+             they run identical engine sources, so this is a bug."
+        );
+        std::process::exit(1);
     }
 }
 
-/// Run the embedded-QuickJS path when it is compiled in.
-#[cfg(any(not(windows), feature = "pac-engine"))]
-fn bench_quickjs(
-    resolver: &ProxyResolver,
-    script: &str,
-    iterations: usize,
-    urls: &[Url],
-) -> Option<Stats> {
-    Some(bench("quickjs", iterations, urls, |u| {
-        resolver.evaluate_pac(script, u).map_err(|e| e.to_string())
-    }))
-}
-
-#[cfg(all(windows, not(feature = "pac-engine")))]
-fn bench_quickjs(_: &ProxyResolver, _: &str, _: usize, _: &[Url]) -> Option<Stats> {
-    None
-}
-
-fn cross_check(resolver: &ProxyResolver, pac_url: &str, script: &str, urls: &[Url]) {
-    let mut mismatches = 0;
+/// Returns the number of URLs on which the `exact` backends disagreed.
+fn cross_check(backends: &[Backend], urls: &[Url]) -> usize {
+    let mut diffs = 0;
+    let mut exact_diffs = 0;
     for u in urls {
-        let system = resolver
-            .evaluate_pac_source(pac_url, u)
-            .map(render)
-            .unwrap_or_else(|e| format!("<error: {e}>"));
-        let quickjs = quickjs_result(resolver, script, u);
-        match quickjs {
-            Some(q) if q != system => {
-                mismatches += 1;
-                println!("  diff {u}");
-                println!("       system  -> {system}");
-                println!("       quickjs -> {q}");
+        let results: Vec<(usize, String)> = backends
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let r = (b.call)(u)
+                    .map(render)
+                    .unwrap_or_else(|e| format!("<error: {e}>"));
+                (i, r)
+            })
+            .collect();
+        let all_equal = results.windows(2).all(|w| w[0].1 == w[1].1);
+        if !all_equal {
+            diffs += 1;
+            println!("  diff {u}");
+            for (i, r) in &results {
+                println!("       {:<8} -> {r}", backends[*i].label);
             }
-            _ => {}
+        }
+        let exact: Vec<&String> = results
+            .iter()
+            .filter(|(i, _)| backends[*i].exact)
+            .map(|(_, r)| r)
+            .collect();
+        if exact.windows(2).any(|w| w[0] != w[1]) {
+            exact_diffs += 1;
         }
     }
-    if mismatches == 0 {
-        println!("cross-check: engines agree on all {} URLs", urls.len());
+    if diffs == 0 {
+        println!(
+            "cross-check: all {} backends agree on all {} URLs",
+            backends.len(),
+            urls.len()
+        );
     } else {
-        println!("cross-check: {mismatches} URL(s) differ between engines (see above)");
+        println!("cross-check: {diffs} URL(s) differ between backends (see above)");
     }
     println!();
-}
-
-#[cfg(any(not(windows), feature = "pac-engine"))]
-fn quickjs_result(resolver: &ProxyResolver, script: &str, url: &Url) -> Option<String> {
-    Some(
-        resolver
-            .evaluate_pac(script, url)
-            .map(render)
-            .unwrap_or_else(|e| format!("<error: {e}>")),
-    )
-}
-
-#[cfg(all(windows, not(feature = "pac-engine")))]
-fn quickjs_result(_: &ProxyResolver, _: &str, _: &Url) -> Option<String> {
-    None
+    exact_diffs
 }
 
 fn render(list: Vec<ProxyKind>) -> String {
@@ -245,6 +307,25 @@ fn render(list: Vec<ProxyKind>) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+fn report_binary_size() {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(meta) = std::fs::metadata(&exe) {
+            println!(
+                "  binary     : {} ({:.2} MiB)",
+                exe.display(),
+                meta.len() as f64 / (1024.0 * 1024.0)
+            );
+        }
+    }
+    #[cfg(feature = "pac-engine-wasmtime")]
+    println!(
+        "  wasm guest : {:.2} MiB AOT artifact embedded (plus the Wasmtime \
+         runtime; compare against a `--features pac-engine`-only build for \
+         the full delta)",
+        os_proxy_resolver::pac_wasm_artifact_size() as f64 / (1024.0 * 1024.0)
+    );
 }
 
 /// Timing statistics for one engine, in nanoseconds.
@@ -297,12 +378,9 @@ impl Stats {
     }
 }
 
-fn bench<F>(label: &'static str, iterations: usize, urls: &[Url], mut call: F) -> Stats
-where
-    F: FnMut(&Url) -> Result<Vec<ProxyKind>, String>,
-{
+fn bench(label: &'static str, iterations: usize, urls: &[Url], call: &EvalFn) -> Stats {
     // Warm up so first-call costs (PAC download/compile, WinHTTP autoproxy
-    // cache priming) don't skew the samples.
+    // cache priming, wasm instantiation) don't skew the samples.
     for u in urls {
         let _ = call(u);
     }
@@ -328,18 +406,35 @@ where
     }
 }
 
-fn compare(system: &Stats, quickjs: &Stats) {
-    let (a, b) = (system.mean(), quickjs.mean());
-    if a <= 0.0 || b <= 0.0 {
+/// Pairwise mean comparison of all timed backends.
+fn compare(stats: &[Stats]) {
+    if stats.len() < 2 {
         return;
     }
     println!();
-    if a < b {
-        println!("=> system is {:.2}x faster than quickjs (by mean)", b / a);
-    } else if b < a {
-        println!("=> quickjs is {:.2}x faster than system (by mean)", a / b);
-    } else {
-        println!("=> system and quickjs are on par (by mean)");
+    for i in 0..stats.len() {
+        for j in (i + 1)..stats.len() {
+            let (a, b) = (&stats[i], &stats[j]);
+            let (ma, mb) = (a.mean(), b.mean());
+            if ma <= 0.0 || mb <= 0.0 {
+                continue;
+            }
+            if ma < mb {
+                println!(
+                    "=> {} is {:.2}x faster than {} (by mean)",
+                    a.label,
+                    mb / ma,
+                    b.label
+                );
+            } else {
+                println!(
+                    "=> {} is {:.2}x faster than {} (by mean)",
+                    b.label,
+                    ma / mb,
+                    a.label
+                );
+            }
+        }
     }
 }
 
@@ -358,7 +453,11 @@ fn fmt_ns(ns: u128) -> String {
 /// life of the process (WinHTTP only loads PAC over http(s)). Each connection
 /// is answered with the script and closed; the accept loop lives on a detached
 /// thread.
+#[cfg(windows)]
 fn serve_pac(script: String) -> String {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
     let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| {
         eprintln!("error: cannot start local PAC server: {e}");
         std::process::exit(1);
@@ -389,9 +488,10 @@ fn print_usage() {
     eprintln!(
         "usage: pac_bench [--iterations N] [--pac-script <path>] [<url>...]\n\
          \n\
-         Compares the system PAC path (WinHTTP on Windows) against the embedded\n\
-         QuickJS engine on the same PAC script and URLs. Build with\n\
-         `--features pac-engine` on Windows to include the QuickJS side."
+         Times every compiled-in PAC path (WinHTTP on Windows, the native\n\
+         QuickJS engine, and the sandboxed Wasmtime engine) on the same PAC\n\
+         script and URLs. Build with `--features \"pac-engine\n\
+         pac-engine-wasmtime\"` to include all engines."
     );
 }
 
