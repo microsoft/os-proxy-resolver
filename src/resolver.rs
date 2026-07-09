@@ -78,13 +78,13 @@ struct Inner {
     _watcher: platform::Watcher,
     config_cache: Mutex<Option<ConfigCache>>,
     retry: Mutex<HashMap<ProxyKind, Instant>>,
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), feature = "pac-engine"))]
     pac: OnceLock<crate::pac::PacEvaluator>,
     #[cfg(not(windows))]
     pac_cache: Mutex<Option<PacScriptCache>>,
     #[cfg(not(windows))]
     wpad_cache: Mutex<Option<WpadCache>>,
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), feature = "pac-engine"))]
     my_ip: Mutex<Option<(Instant, Option<String>)>>,
     #[cfg(windows)]
     winhttp: OnceLock<Option<platform::WinHttpResolver>>,
@@ -141,13 +141,13 @@ impl ProxyResolver {
                 _watcher: watcher,
                 config_cache: Mutex::new(None),
                 retry: Mutex::new(HashMap::new()),
-                #[cfg(not(windows))]
+                #[cfg(any(not(windows), feature = "pac-engine"))]
                 pac: OnceLock::new(),
                 #[cfg(not(windows))]
                 pac_cache: Mutex::new(None),
                 #[cfg(not(windows))]
                 wpad_cache: Mutex::new(None),
-                #[cfg(not(windows))]
+                #[cfg(any(not(windows), feature = "pac-engine"))]
                 my_ip: Mutex::new(None),
                 #[cfg(windows)]
                 winhttp: OnceLock::new(),
@@ -225,7 +225,7 @@ impl ProxyResolver {
     /// [`evaluate_pac_source`](Self::evaluate_pac_source) to load one from a
     /// path or URL. Runs on the caged evaluator thread with the same
     /// sanitization and hard timeout as regular resolution.
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), feature = "pac-engine"))]
     pub fn evaluate_pac(&self, script: &str, url: &Url) -> Result<Vec<ProxyKind>> {
         let script: Arc<str> = Arc::from(script);
         self.pac_evaluator().find_proxy(&script, url, self.my_ip())
@@ -363,7 +363,7 @@ impl ProxyResolver {
         vec![ProxyKind::Direct]
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), feature = "pac-engine"))]
     fn pac_evaluator(&self) -> &crate::pac::PacEvaluator {
         self.inner
             .pac
@@ -452,7 +452,7 @@ impl ProxyResolver {
     /// Best-effort local IP for PAC `myIpAddress()`, so the engine doesn't
     /// fall back to resolving the hostname (slow, often wrong on multi-homed
     /// machines). A connected UDP socket never sends a packet.
-    #[cfg(not(windows))]
+    #[cfg(any(not(windows), feature = "pac-engine"))]
     fn my_ip(&self) -> Option<String> {
         let mut cached = lock(&self.inner.my_ip);
         if let Some((at, ip)) = cached.as_ref() {
