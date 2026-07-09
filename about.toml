@@ -1,0 +1,36 @@
+# cargo-about configuration.
+#
+# Regenerate the third-party notices with:
+#   cargo about generate about.hbs > ThirdPartyNotices.txt
+#
+# The template embeds the hand-written PAC-engine and QuickJS-NG sections
+# (which describe vendored C sources cargo-about can't see into) and then
+# appends an auto-generated, per-license listing of every crate compiled into
+# the binary.
+
+# Licenses we accept in the notices. Mirrors deny.toml's allow-list.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+
+# Generate notices for every platform we ship, so target-specific dependencies
+# (WinHTTP bindings on Windows, the rustls TLS stack elsewhere) are all covered.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "armv7-unknown-linux-gnueabihf",
+]
+
+# Don't emit notices for this crate itself; it's covered by LICENSE.txt.
+private = { ignore = true }
