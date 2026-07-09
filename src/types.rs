@@ -34,6 +34,24 @@ impl fmt::Display for ProxyKind {
     }
 }
 
+/// Selects which embedded engine evaluates PAC scripts on the caged worker
+/// (see [`ResolverOptions::pac_backend`](crate::ResolverOptions)). Does not
+/// affect Windows' regular resolution path, which delegates PAC to WinHTTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum PacBackendKind {
+    /// The in-process QuickJS-NG engine (C, compiled to native code). Built
+    /// on macOS/Linux always, on Windows behind the `pac-engine` feature.
+    #[default]
+    Native,
+    /// The same QuickJS-NG engine compiled to WebAssembly and run inside a
+    /// Wasmtime sandbox, so a memory-safety bug triggered by a hostile
+    /// PAC/WPAD script is contained to the guest's linear memory. Requires
+    /// the `pac-engine-wasmtime` feature; selecting it without that feature
+    /// makes PAC evaluation fail with [`Error::PacEval`].
+    Wasmtime,
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors from proxy resolution. PAC/WPAD failures are generally *not*

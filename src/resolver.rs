@@ -9,7 +9,7 @@
 use crate::env_cfg::EnvConfig;
 use crate::notify::{Notifier, Subscription};
 use crate::platform::{self, OsProxyConfig};
-use crate::types::{Error, ProxyKind, Result};
+use crate::types::{Error, PacBackendKind, ProxyKind, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -42,6 +42,12 @@ pub struct ResolverOptions {
     /// Re-read the OS config after this long even without a change signal
     /// (covers platforms where no watcher could be started).
     pub config_ttl: Duration,
+    /// Which embedded engine evaluates PAC scripts (macOS/Linux resolution,
+    /// [`ProxyResolver::evaluate_pac`], and the non-WinHTTP paths of
+    /// [`ProxyResolver::evaluate_pac_source`]). The default is the in-process
+    /// native engine; [`PacBackendKind::Wasmtime`] selects the sandboxed
+    /// WebAssembly engine and requires the `pac-engine-wasmtime` feature.
+    pub pac_backend: PacBackendKind,
 }
 
 impl Default for ResolverOptions {
@@ -56,6 +62,7 @@ impl Default for ResolverOptions {
             wpad_negative_ttl: Duration::from_secs(300),
             retry_cooldown: Duration::from_secs(300),
             config_ttl: Duration::from_secs(30),
+            pac_backend: PacBackendKind::default(),
         }
     }
 }
@@ -365,9 +372,12 @@ impl ProxyResolver {
 
     #[cfg(any(not(windows), feature = "pac-engine"))]
     fn pac_evaluator(&self) -> &crate::pac::PacEvaluator {
-        self.inner
-            .pac
-            .get_or_init(|| crate::pac::PacEvaluator::new(self.inner.options.pac_timeout))
+        self.inner.pac.get_or_init(|| {
+            crate::pac::PacEvaluator::new(
+                self.inner.options.pac_timeout,
+                self.inner.options.pac_backend,
+            )
+        })
     }
 
     /// Evaluate a PAC script for resolution; `None` means "PAC layer

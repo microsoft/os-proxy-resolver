@@ -62,7 +62,7 @@
 #![allow(dead_code)]
 
 mod ffi;
-mod state;
+pub(crate) mod state;
 
 use std::fmt;
 use std::net::IpAddr;

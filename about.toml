@@ -18,6 +18,8 @@ accepted = [
     "0BSD",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # Wasmtime/Cranelift (`pac-engine-wasmtime` feature); see deny.toml.
+    "Apache-2.0 WITH LLVM-exception",
 ]
 
 # Generate notices for every platform we ship, so target-specific dependencies

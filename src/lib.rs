@@ -60,6 +60,15 @@
 //! queueing. The worker protocol is process-agnostic so the evaluator can
 //! later move out-of-process entirely (Chromium-style sandboxing).
 //!
+//! With the `pac-engine-wasmtime` feature (opt-in, any platform), the cage
+//! gains a wall: [`ResolverOptions::pac_backend`] can select
+//! [`PacBackendKind::Wasmtime`], which runs the same QuickJS-NG compiled to
+//! WebAssembly inside a Wasmtime sandbox (ahead-of-time compiled — no JIT or
+//! compiler at runtime). A memory-safety bug in the C engine is then contained
+//! to the guest's linear memory, and the script's only reach into the host is
+//! the DNS/local-IP/log callbacks; runaway scripts are stopped by epoch
+//! interruption. See the "PAC cage" section of the README for details.
+//!
 //! # Change notification
 //!
 //! Two complementary primitives, identical across platforms:
@@ -93,7 +102,17 @@ mod wpad;
 
 pub use notify::Subscription;
 pub use resolver::{ProxyResolver, ResolverOptions};
-pub use types::{Error, ProxyKind, Result};
+pub use types::{Error, PacBackendKind, ProxyKind, Result};
+
+/// Size in bytes of the embedded ahead-of-time-compiled PAC guest module —
+/// the dominant binary-size contribution of the `pac-engine-wasmtime`
+/// feature. Exposed for the `pac_bench` example's size report; not a stable
+/// API.
+#[cfg(feature = "pac-engine-wasmtime")]
+#[doc(hidden)]
+pub fn pac_wasm_artifact_size() -> usize {
+    pac::engine_wasmtime::CWASM_SIZE
+}
 
 /// Resolve the ordered proxy list for `url` using the process-wide
 /// [`ProxyResolver`] (created on first use).

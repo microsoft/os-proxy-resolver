@@ -24,11 +24,36 @@ tokio = ["dep:tokio"]
 # against the embedded engine — production Windows stays WinHTTP-only / pure
 # Rust, so this is deliberately *not* part of the default feature set.
 pac-engine = ["dep:rquickjs-sys"]
+# Additionally build the sandboxed PAC backend: QuickJS-NG compiled to
+# WebAssembly (see pac-wasm-guest/), run under Wasmtime in AOT mode. The
+# runtime dependency is compiled WITHOUT any compiler (no Cranelift/JIT) —
+# build.rs precompiles the vendored guest module with a build-dependency
+# Wasmtime instead, and at runtime only `Module::deserialize` is used. Opt-in
+# on every platform; select it per resolver with `ResolverOptions.pac_backend`.
+# (Implies `pac-engine` so the native engine is always available to compare
+# against; off Windows that is a no-op.)
+pac-engine-wasmtime = ["pac-engine", "dep:wasmtime"]
 
 [dependencies]
 url = "2"
 log = "0.4"
 tokio = { version = "1", optional = true, default-features = false, features = ["sync"] }
+# Runtime for the sandboxed PAC backend, in AOT mode only: `runtime` + `std`
+# but deliberately NO `cranelift` (or `winch`/`pulley`), so this build cannot
+# compile wasm at all — it can only `Module::deserialize` the artifact that
+# build.rs precompiled. Pinned to the exact version of the `wasmtime-aot`
+# build-dependency below because serialized modules only deserialize in the
+# same Wasmtime version.
+wasmtime = { version = "=46.0.1", optional = true, default-features = false, features = ["runtime", "std"] }
+
+[build-dependencies]
+# Compile-only Wasmtime (Cranelift, no runtime) used by build.rs to
+# ahead-of-time compile pac-wasm-guest/pac_guest.wasm for $TARGET. Same crate,
+# same pinned version as the runtime dependency above (serialized modules only
+# deserialize in the identical Wasmtime version), but a different feature set:
+# the feature resolver (v2) does not unify features between build- and normal
+# dependencies, so Cranelift stays out of the library itself.
+wasmtime = { version = "=46.0.1", optional = true, default-features = false, features = ["cranelift", "std"] }
 
 [target.'cfg(not(windows))'.dependencies]
 # PAC / wpad.dat fetching. Sync, small, rustls-backed so no OpenSSL cross headaches.

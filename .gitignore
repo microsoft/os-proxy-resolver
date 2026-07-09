@@ -1,1 +1,5 @@
 /target
+# The guest crate is excluded from the workspace and built standalone; its
+# target dir also caches the downloaded wasi-sdk toolchain. Its Cargo.lock and
+# the vendored pac_guest.wasm ARE tracked (reproducible guest builds).
+/pac-wasm-guest/target

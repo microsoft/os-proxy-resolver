@@ -33,6 +33,10 @@ allow = [
     "0BSD",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # Wasmtime/Cranelift (`pac-engine-wasmtime` feature). The LLVM exception
+    # only *relaxes* Apache-2.0 (drops notice obligations for binary
+    # redistribution of compiler output); still permissive, no copyleft.
+    "Apache-2.0 WITH LLVM-exception",
 ]
 # Crates must be at least this confident about their detected license.
 confidence-threshold = 0.9

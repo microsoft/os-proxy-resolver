@@ -1,0 +1,28 @@
+# The PAC guest module: QuickJS-NG (via Bytecode Alliance's Javy crate)
+# compiled to wasm32-wasip1, driven by the `pac-engine-wasmtime` backend in the
+# parent crate. Deliberately NOT a workspace member: it only builds for
+# wasm32-wasip1 and its build downloads the wasi-sdk C toolchain, so the parent
+# crate vendors the built artifact (pac_guest.wasm) instead. See README.md in
+# this directory for how to regenerate it.
+[package]
+name = "pac-wasm-guest"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+publish = false
+description = "QuickJS-NG (via Javy) as a wasm32-wasip1 module for os-proxy-resolver's sandboxed PAC backend"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Javy pins rquickjs 0.12.x — the same vendored quickjs-ng revision the native
+# backend links through rquickjs-sys 0.12.x, so PAC semantics stay identical.
+javy = "8.0.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "debuginfo"
