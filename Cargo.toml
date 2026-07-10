@@ -49,6 +49,16 @@ pac-engine-wasmtime = ["dep:wasmtime"]
 # Wasmtime backend (explicit bounds checks on every memory access) but with
 # identical PAC semantics; independent of the other two backend features.
 pac-engine-wasm2c = ["dep:cc"]
+# JIT variant of the Wasmtime backend: the same guest and host code, but with
+# Cranelift compiled into the runtime and the vendored pac_guest.wasm
+# JIT-compiled at startup (`Module::new`) instead of AOT-precompiled by
+# build.rs. The operationally simplest wasm backend — no build-time compile
+# step, no target-specific artifact, no version-locked `unsafe` deserialize —
+# at the cost of the largest binary (Cranelift ships in it), a one-time
+# startup compile, and giving up the AOT build's "no compiler at runtime"
+# hardening. Select it with `PacBackendKind::WasmtimeJit`; independent of the
+# other backend features.
+pac-engine-wasmtime-jit = ["dep:wasmtime", "wasmtime/cranelift"]
 
 [dependencies]
 url = "2"
@@ -59,7 +69,8 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 # compile wasm at all — it can only `Module::deserialize` the artifact that
 # build.rs precompiled. Pinned to the exact version of the `wasmtime-aot`
 # build-dependency below because serialized modules only deserialize in the
-# same Wasmtime version.
+# same Wasmtime version. (The `pac-engine-wasmtime-jit` feature deliberately
+# re-adds `cranelift` here.)
 wasmtime = { version = "=46.0.1", optional = true, default-features = false, features = ["runtime", "std"] }
 
 [build-dependencies]

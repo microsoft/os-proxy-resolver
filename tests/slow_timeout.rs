@@ -18,6 +18,7 @@
     not(windows),
     feature = "pac-engine",
     feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
     feature = "pac-engine-wasm2c"
 ))]
 
@@ -77,4 +78,11 @@ fn engine_deadline_wasmtime() {
 #[ignore = "burns the full 10s engine deadline"]
 fn engine_deadline_wasm2c() {
     engine_deadline_interrupts_and_recovers(PacBackendKind::Wasm2c);
+}
+
+#[cfg(feature = "pac-engine-wasmtime-jit")]
+#[test]
+#[ignore = "burns the full 10s engine deadline"]
+fn engine_deadline_wasmtime_jit() {
+    engine_deadline_interrupts_and_recovers(PacBackendKind::WasmtimeJit);
 }

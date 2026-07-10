@@ -99,6 +99,7 @@ mod notify;
     not(windows),
     feature = "pac-engine",
     feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
     feature = "pac-engine-wasm2c"
 ))]
 mod pac;
@@ -115,6 +116,7 @@ mod wpad;
     not(windows),
     not(feature = "pac-engine"),
     not(feature = "pac-engine-wasmtime"),
+    not(feature = "pac-engine-wasmtime-jit"),
     not(feature = "pac-engine-wasm2c")
 ))]
 compile_error!(

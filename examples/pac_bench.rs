@@ -40,6 +40,7 @@
 #[cfg(any(
     feature = "pac-engine",
     feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
     feature = "pac-engine-wasm2c"
 ))]
 use os_proxy_resolver::{PacBackendKind, ResolverOptions};
@@ -192,6 +193,19 @@ fn backends(script: &str) -> Vec<Backend> {
         let script = script.to_string();
         backends.push(Backend {
             label: "wasm2c",
+            exact: true,
+            call: Box::new(move |u| resolver.evaluate_pac(&script, u).map_err(|e| e.to_string())),
+        });
+    }
+
+    #[cfg(feature = "pac-engine-wasmtime-jit")]
+    {
+        let mut options = ResolverOptions::default();
+        options.pac_backend = PacBackendKind::WasmtimeJit;
+        let resolver = ProxyResolver::with_options(options);
+        let script = script.to_string();
+        backends.push(Backend {
+            label: "wasmtime-jit",
             exact: true,
             call: Box::new(move |u| resolver.evaluate_pac(&script, u).map_err(|e| e.to_string())),
         });

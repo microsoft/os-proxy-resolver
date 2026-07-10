@@ -255,15 +255,15 @@ jobs:
           #                  on a 32-bit target.
           - name: windows
             os: windows-latest
-            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c pac-engine-wasmtime-jit
             iterations: 3000
           - name: macos
             os: macos-latest
-            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c pac-engine-wasmtime-jit
             iterations: 3000
           - name: linux
             os: ubuntu-latest
-            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c pac-engine-wasmtime-jit
             iterations: 3000
           - name: linux armv7 (qemu)
             os: ubuntu-latest
@@ -327,30 +327,22 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --locked
 
-      # Three release builds of pac_bench with growing feature sets, recording
-      # the binary size of each so the per-backend size delta is explicit.
+      # One release build of pac_bench per backend, each with ONLY that
+      # backend compiled in — real deployments build a single backend, so
+      # absolute single-backend sizes are the meaningful comparison.
       # (`--no-default-features` because the default set enables Wasmtime.)
-      - name: Measure binary-size deltas
+      - name: Measure single-backend binary sizes
         run: |
           set -e
           CARGO="${{ matrix.use_cross && 'cross' || 'cargo' }}"
           TARGET_FLAG="${{ matrix.target && format('--target {0}', matrix.target) || '' }}"
           BIN="target/${{ matrix.target && format('{0}/', matrix.target) || '' }}release/examples/pac_bench"
           [ "$RUNNER_OS" = "Windows" ] && BIN="$BIN.exe"
-          size_of() { wc -c < "$BIN" | tr -d ' '; }
-
-          $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio pac-engine"
-          base=$(size_of)
-          echo "pac_bench (pac-engine only)            : $base bytes"
-          if [[ "${{ matrix.features }}" == *pac-engine-wasmtime* ]]; then
-            $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio pac-engine pac-engine-wasmtime"
-            wt=$(size_of)
-            echo "pac_bench (+ pac-engine-wasmtime)      : $wt bytes (delta $((wt - base)))"
-          fi
-          $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio ${{ matrix.features }}"
-          full=$(size_of)
-          echo "pac_bench (all backends for this OS)   : $full bytes"
-          echo "wasm2c backend binary-size delta       : $((full - ${wt:-$base})) bytes"
+          echo "pac_bench single-backend binary sizes:"
+          for feature in ${{ matrix.features }}; do
+            $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio $feature"
+            printf '  %-26s: %s bytes\n' "$feature" "$(wc -c < "$BIN" | tr -d ' ')"
+          done
         shell: bash
 
       # Correctness first: the full test suite against every embedded engine
@@ -392,6 +384,11 @@ jobs:
             os: ubuntu-latest
             features: --no-default-features --features "tokio pac-engine-wasm2c"
             needs_wasm2c: true
+          # JIT-only: Cranelift in the runtime, Module::new at startup, no
+          # AOT artifact (and so no build-time Cranelift either).
+          - name: linux wasmtime-jit-only
+            os: ubuntu-latest
+            features: --no-default-features --features "tokio pac-engine-wasmtime-jit"
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust

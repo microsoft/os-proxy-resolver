@@ -22,10 +22,16 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(any(feature = "pac-engine-wasmtime", feature = "pac-engine-wasm2c"))]
+    #[cfg(any(
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     println!("cargo:rerun-if-env-changed=OS_PROXY_RESOLVER_PAC_GUEST_WASM");
     #[cfg(feature = "pac-engine-wasmtime")]
     precompile_pac_guest();
+    #[cfg(feature = "pac-engine-wasmtime-jit")]
+    stage_pac_guest_for_jit();
     #[cfg(feature = "pac-engine-wasm2c")]
     wasm2c_pac_guest();
 }
@@ -33,7 +39,11 @@ fn main() {
 /// The vendored guest module. Point the env var at a fresh build of
 /// pac-wasm-guest to test guest changes without touching the vendored copy
 /// (see pac-wasm-guest/README.md).
-#[cfg(any(feature = "pac-engine-wasmtime", feature = "pac-engine-wasm2c"))]
+#[cfg(any(
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+))]
 fn guest_wasm_path() -> String {
     let wasm_path = std::env::var("OS_PROXY_RESOLVER_PAC_GUEST_WASM")
         .unwrap_or_else(|_| "pac-wasm-guest/pac_guest.wasm".to_string());
@@ -87,6 +97,19 @@ fn precompile_pac_guest_inner() {
         .join("pac_guest.cwasm");
     std::fs::write(&out, cwasm)
         .unwrap_or_else(|e| panic!("failed to write {}: {e}", out.display()));
+}
+
+/// For the JIT variant the raw guest wasm itself is embedded in the binary
+/// (`Module::new` compiles it at startup); stage it in OUT_DIR
+/// so the `include_bytes!` respects the OS_PROXY_RESOLVER_PAC_GUEST_WASM
+/// override just like the AOT and wasm2c paths do.
+#[cfg(feature = "pac-engine-wasmtime-jit")]
+fn stage_pac_guest_for_jit() {
+    let wasm_path = guest_wasm_path();
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"))
+        .join("pac_guest_jit.wasm");
+    std::fs::copy(&wasm_path, &out)
+        .unwrap_or_else(|e| panic!("failed to copy {wasm_path} to {}: {e}", out.display()));
 }
 
 /// The WABT release the wasm2c backend is developed and tested against. The

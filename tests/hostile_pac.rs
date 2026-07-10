@@ -14,6 +14,7 @@
     not(windows),
     feature = "pac-engine",
     feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
     feature = "pac-engine-wasm2c"
 ))]
 
@@ -74,4 +75,12 @@ fn hostile_infinite_loop_times_out_and_fails_fast_wasmtime() {
 #[test]
 fn hostile_infinite_loop_times_out_and_fails_fast_wasm2c() {
     hostile_infinite_loop(PacBackendKind::Wasm2c);
+}
+
+/// Same containment for the JIT variant (same guest and host code as the
+/// AOT backend, so the same interrupt + epoch layers).
+#[cfg(feature = "pac-engine-wasmtime-jit")]
+#[test]
+fn hostile_infinite_loop_times_out_and_fails_fast_wasmtime_jit() {
+    hostile_infinite_loop(PacBackendKind::WasmtimeJit);
 }
