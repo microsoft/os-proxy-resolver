@@ -105,3 +105,12 @@ rquickjs-sys = { version = "0.12.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+
+[profile.release]
+# The wasm2c backend generates one C function per wasm function (~53k for the
+# QuickJS guest). Their local symbols would otherwise add several MiB of symbol
+# table to release binaries — most visibly on macOS, whose linker keeps all
+# local symbols, where it roughly triples the wasm2c size delta. Stripping
+# removes them (no runtime effect) and keeps artifact sizes comparable across
+# platforms.
+strip = "symbols"
