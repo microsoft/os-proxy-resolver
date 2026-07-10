@@ -61,22 +61,31 @@
 
 #![allow(dead_code)]
 
+// The native QuickJS FFI is only compiled with the `pac-engine` feature; the
+// `state` module and `Error`/`DEFAULT_TIMEOUT` below are shared with the
+// Wasmtime backend and are always present when this module is.
+#[cfg(feature = "pac-engine")]
 mod ffi;
 pub(crate) mod state;
 
 use std::fmt;
+#[cfg(feature = "pac-engine")]
 use std::net::IpAddr;
 use std::time::Duration;
 
+#[cfg(feature = "pac-engine")]
 use self::state::HostState;
 
 /// Default wall-clock budget for a single script evaluation or PAC call.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default QuickJS runtime memory limit in bytes (64 MiB).
+#[cfg(feature = "pac-engine")]
 pub const DEFAULT_MEMORY_LIMIT: usize = 64 * 1024 * 1024;
 
+#[cfg(feature = "pac-engine")]
 const HELPERS_JS: &str = include_str!("pac_helpers.js");
+#[cfg(feature = "pac-engine")]
 const HELPERS_MS_JS: &str = include_str!("pac_helpers_ms.js");
 
 /// Errors returned by [`PacEngine`].
@@ -122,16 +131,19 @@ impl std::error::Error for Error {}
 /// installed and (after [`load`](PacEngine::load)) a PAC script.
 ///
 /// Not `Send`/`Sync` — see the module-level documentation on thread safety.
+#[cfg(feature = "pac-engine")]
 pub struct PacEngine {
     ctx: ffi::Context,
 }
 
+#[cfg(feature = "pac-engine")]
 impl fmt::Debug for PacEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PacEngine").finish_non_exhaustive()
     }
 }
 
+#[cfg(feature = "pac-engine")]
 impl PacEngine {
     /// Creates an engine and installs the built-in PAC helper library.
     pub fn new() -> Result<Self, Error> {

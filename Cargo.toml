@@ -16,23 +16,39 @@ categories = ["network-programming", "os"]
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = []
+# PAC backend selection is explicit: enable at least one of `pac-engine`
+# (native QuickJS) and/or `pac-engine-wasmtime` (sandboxed). On non-Windows a
+# backend is required (there is no OS PAC evaluator) — building with neither is
+# a compile error; on Windows WinHTTP always handles PAC, so a backend-less
+# build is valid there. The default set enables the sandboxed Wasmtime backend
+# on every platform, which is also the default runtime `pac_backend`.
+default = ["pac-engine-wasmtime"]
 # Async change notification via tokio::sync::watch.
 tokio = ["dep:tokio"]
-# Also build the embedded QuickJS PAC engine on Windows (it is always built off
-# Windows). This is only for the `pac_bench` example, which compares WinHTTP
-# against the embedded engine — production Windows stays WinHTTP-only / pure
-# Rust, so this is deliberately *not* part of the default feature set.
+# The embedded native QuickJS PAC engine (compiles the quickjs-ng C sources via
+# `rquickjs-sys`). Optional on every platform. Off Windows it is one of the two
+# selectable backends; on Windows it is additionally useful for the `pac_bench`
+# WinHTTP-vs-embedded comparison.
 pac-engine = ["dep:rquickjs-sys"]
-# Additionally build the sandboxed PAC backend: QuickJS-NG compiled to
-# WebAssembly (see pac-wasm-guest/), run under Wasmtime in AOT mode. The
-# runtime dependency is compiled WITHOUT any compiler (no Cranelift/JIT) —
-# build.rs precompiles the vendored guest module with a build-dependency
-# Wasmtime instead, and at runtime only `Module::deserialize` is used. Opt-in
-# on every platform; select it per resolver with `ResolverOptions.pac_backend`.
-# (Implies `pac-engine` so the native engine is always available to compare
-# against; off Windows that is a no-op.)
-pac-engine-wasmtime = ["pac-engine", "dep:wasmtime"]
+# The sandboxed PAC backend: QuickJS-NG compiled to WebAssembly (see
+# pac-wasm-guest/), run under Wasmtime in AOT mode. The runtime dependency is
+# compiled WITHOUT any compiler (no Cranelift/JIT) — build.rs precompiles the
+# vendored guest module with a build-dependency Wasmtime instead, and at
+# runtime only `Module::deserialize` is used. Independent of `pac-engine`, so a
+# Wasmtime-only build is possible; enable both to compare them (e.g. in
+# `pac_bench`). Cannot target platforms Cranelift can't AOT-compile for (e.g.
+# 32-bit armv7) — use `pac-engine-wasm2c` (sandboxed) or `pac-engine` (native)
+# there instead.
+pac-engine-wasmtime = ["dep:wasmtime"]
+# The portable sandboxed PAC backend: the same wasm guest as
+# `pac-engine-wasmtime`, but translated to standard C with WABT's `wasm2c` at
+# build time and compiled like any other C code — which makes the wasm sandbox
+# available on every target the crate compiles for, including ones Cranelift
+# cannot AOT-compile for (32-bit armv7, ...). Requires the pinned `wasm2c`
+# binary on the build host (see pac-wasm-guest/README.md). Slower than the
+# Wasmtime backend (explicit bounds checks on every memory access) but with
+# identical PAC semantics; independent of the other two backend features.
+pac-engine-wasm2c = ["dep:cc"]
 
 [dependencies]
 url = "2"
@@ -52,15 +68,22 @@ wasmtime = { version = "=46.0.1", optional = true, default-features = false, fea
 # same pinned version as the runtime dependency above (serialized modules only
 # deserialize in the identical Wasmtime version), but a different feature set:
 # the feature resolver (v2) does not unify features between build- and normal
-# dependencies, so Cranelift stays out of the library itself.
-wasmtime = { version = "=46.0.1", optional = true, default-features = false, features = ["cranelift", "std"] }
+# dependencies, so Cranelift stays out of the library itself. `all-arch`
+# compiles every Cranelift ISA into the build script, so cross-compiling the
+# crate (macOS -> Windows, x86_64 container -> aarch64/armv7, ...) can still
+# AOT the guest for the *target* architecture.
+wasmtime = { version = "=46.0.1", optional = true, default-features = false, features = ["cranelift", "std", "all-arch"] }
+# Compiles the wasm2c-generated C, the vendored wasm-rt runtime and the C shim
+# for the `pac-engine-wasm2c` backend.
+cc = { version = "1", optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 # PAC / wpad.dat fetching. Sync, small, rustls-backed so no OpenSSL cross headaches.
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
-# Embedded QuickJS-NG (MIT) for the PAC engine. Vendors and compiles the
-# quickjs-ng C sources via `cc`. Not used on Windows (WinHTTP handles PAC).
-rquickjs-sys = "0.12.1"
+# Embedded QuickJS-NG (MIT) for the native PAC engine. Vendors and compiles the
+# quickjs-ng C sources via `cc`. Optional (feature `pac-engine`) so a
+# Wasmtime-only build links no C engine.
+rquickjs-sys = { version = "0.12.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.9"

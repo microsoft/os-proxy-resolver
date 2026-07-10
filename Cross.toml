@@ -1,0 +1,14 @@
+# Configuration for `cross` (the containerized cross-compilation tool used by
+# CI for the ARM Linux targets).
+#
+# The `pac-engine-wasm2c` feature normally runs the pinned `wasm2c` (WABT
+# 1.0.41) from build.rs, but the WABT release binaries need a newer glibc than
+# the cross container images ship, so they cannot run inside the container.
+# Instead, CI generates the (target-independent) C on the host runner first
+# and points the containerized build at it with
+# OS_PROXY_RESOLVER_PAC_GUEST_C_DIR — a manifest-relative path, so it stays
+# valid across the host/container path mapping. Passing the variable through
+# is all the container needs.
+
+[build.env]
+passthrough = ["OS_PROXY_RESOLVER_PAC_GUEST_C_DIR"]

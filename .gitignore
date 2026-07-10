@@ -3,3 +3,6 @@
 # target dir also caches the downloaded wasi-sdk toolchain. Its Cargo.lock and
 # the vendored pac_guest.wasm ARE tracked (reproducible guest builds).
 /pac-wasm-guest/target
+# CI drops pregenerated wasm2c output here for cross builds (see build.rs
+# OS_PROXY_RESOLVER_PAC_GUEST_C_DIR and .github/workflows/ci.yml).
+/pac-wasm-guest/generated

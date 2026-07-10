@@ -3,9 +3,9 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-// The host <-> guest ABI shared between the Wasmtime PAC backend and the
-// `pac-wasm-guest` crate (which pulls this file in with `include!` so the two
-// sides can never drift apart).
+// The host <-> guest ABI shared between the wasm PAC backends (Wasmtime and
+// wasm2c) and the `pac-wasm-guest` crate (which pulls this file in with
+// `include!` so the sides can never drift apart).
 //
 // # Calling convention
 //
@@ -49,6 +49,11 @@ pub const STATUS_JS_EXCEPTION: u8 = 3;
 pub const STATUS_RETURNED_NON_STRING: u8 = 4;
 /// Engine-level failure; payload is the message.
 pub const STATUS_INTERNAL: u8 = 5;
+/// Evaluation was stopped by the host deadline: the guest's QuickJS interrupt
+/// handler polled `host_should_interrupt` and it returned nonzero. The guest
+/// unwound cleanly (unlike a Wasmtime epoch trap or a wasm2c trap, after which
+/// the instance must be discarded). Payload is empty.
+pub const STATUS_TIMEOUT: u8 = 6;
 
 /// Returned by the staging host imports when there is no result (JS `null`).
 pub const RESULT_NONE: i32 = -1;

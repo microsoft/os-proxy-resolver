@@ -1,0 +1,35 @@
+%%{init: {"theme":"base","themeVariables":{"fontSize":"20px","primaryColor":"#eef4ff","primaryBorderColor":"#22314f","primaryTextColor":"#101828","lineColor":"#22314f","clusterBkg":"#f6f8fc","clusterBorder":"#22314f"}}}%%
+flowchart TB
+    subgraph resolver["os-proxy-resolver"]
+        api["Public API — ProxyResolver / resolve_proxy(url)"]
+
+        subgraph core["Resolution (precedence: env → OS → DIRECT)"]
+            env["env vars — http_proxy / no_proxy"]
+            os["OS proxy config (per-platform)"]
+            pac["PAC evaluation"]
+        end
+
+        subgraph platform["Platform layer"]
+            mac["macOS — SCDynamicStore"]
+            lin["Linux — gsettings/dconf"]
+            win["Windows — WinHTTP"]
+        end
+
+        subgraph pacbox["PAC engine (Wasmtime backend)"]
+            eval["PacEvaluator — worker thread, timeouts, URL sanitize"]
+            subgraph sandbox["Wasmtime sandbox (AOT, no JIT)"]
+                guest["QuickJS-NG guest (wasm) + PAC helpers JS"]
+            end
+            hostcb["Host callbacks — DNS / my-ip / alert"]
+        end
+    end
+
+    api --> core
+    os --> platform
+    pac --> pacbox
+    eval --> sandbox
+    guest --> hostcb
+
+    classDef box stroke-width:2.5px;
+    class api,env,os,pac,mac,lin,win,eval,guest,hostcb box;
+    linkStyle default stroke-width:2.5px;

@@ -6,13 +6,17 @@
 //! The caged PAC evaluator (macOS/Linux only — Windows delegates PAC to
 //! WinHTTP).
 //!
-//! Two interchangeable backends implement [`PacBackend`]:
+//! Three interchangeable backends implement [`PacBackend`]:
 //!
 //! * [`engine::PacEngine`] — QuickJS-NG compiled to native code, in-process.
 //! * `engine_wasmtime::WasmtimePacEngine` (feature `pac-engine-wasmtime`) —
 //!   the same QuickJS-NG compiled to WebAssembly, run inside a Wasmtime
 //!   sandbox so a C-level memory-safety bug stays contained to the guest's
 //!   linear memory.
+//! * `engine_wasm2c::Wasm2cPacEngine` (feature `pac-engine-wasm2c`) — the
+//!   same wasm guest translated to portable C with WABT's `wasm2c`, keeping
+//!   the sandbox on targets Wasmtime/Cranelift cannot AOT-compile for
+//!   (e.g. 32-bit armv7).
 //!
 //! Either engine wraps a JS context that is neither `Send` nor `Sync`, and
 //! the PAC builtins `dnsResolve()` / `myIpAddress()` do synchronous network
@@ -33,8 +37,18 @@
 //! (Chromium-style: a subprocess you can resource-limit and kill).
 
 pub(crate) mod engine;
+#[cfg(feature = "pac-engine-wasm2c")]
+pub(crate) mod engine_wasm2c;
 #[cfg(feature = "pac-engine-wasmtime")]
 pub(crate) mod engine_wasmtime;
+// The guest ABI and the runtime-agnostic host helpers shared by the wasm
+// backends (the guest crate pulls wasm_abi in with `include!`; not every
+// backend build uses every constant).
+#[cfg(any(feature = "pac-engine-wasmtime", feature = "pac-engine-wasm2c"))]
+#[allow(dead_code)]
+pub(crate) mod wasm_abi;
+#[cfg(any(feature = "pac-engine-wasmtime", feature = "pac-engine-wasm2c"))]
+pub(crate) mod wasm_host;
 
 use crate::types::{parse_pac_result, sanitize_url_for_pac, Error, ProxyKind, Result};
 use crate::PacBackendKind;
@@ -83,6 +97,7 @@ pub(crate) trait PacBackend: Sized + 'static {
     fn set_log_sink(&mut self, sink: engine::state::LogSink);
 }
 
+#[cfg(feature = "pac-engine")]
 impl PacBackend for engine::PacEngine {
     const NAME: &'static str = "native";
 
@@ -151,10 +166,17 @@ fn spawn_worker<B: PacBackend>() -> Worker {
 /// compiled into this build.
 fn worker(kind: PacBackendKind) -> Result<&'static Worker> {
     match kind {
+        #[cfg(feature = "pac-engine")]
         PacBackendKind::Native => {
             static WORKER: std::sync::OnceLock<Worker> = std::sync::OnceLock::new();
             Ok(WORKER.get_or_init(spawn_worker::<engine::PacEngine>))
         }
+        #[cfg(not(feature = "pac-engine"))]
+        PacBackendKind::Native => Err(Error::PacEval(
+            "the native PAC backend is not compiled in (enable the \
+             `pac-engine` feature)"
+                .into(),
+        )),
         #[cfg(feature = "pac-engine-wasmtime")]
         PacBackendKind::Wasmtime => {
             static WORKER: std::sync::OnceLock<Worker> = std::sync::OnceLock::new();
@@ -164,6 +186,17 @@ fn worker(kind: PacBackendKind) -> Result<&'static Worker> {
         PacBackendKind::Wasmtime => Err(Error::PacEval(
             "the Wasmtime PAC backend is not compiled in (enable the \
              `pac-engine-wasmtime` feature)"
+                .into(),
+        )),
+        #[cfg(feature = "pac-engine-wasm2c")]
+        PacBackendKind::Wasm2c => {
+            static WORKER: std::sync::OnceLock<Worker> = std::sync::OnceLock::new();
+            Ok(WORKER.get_or_init(spawn_worker::<engine_wasm2c::Wasm2cPacEngine>))
+        }
+        #[cfg(not(feature = "pac-engine-wasm2c"))]
+        PacBackendKind::Wasm2c => Err(Error::PacEval(
+            "the wasm2c PAC backend is not compiled in (enable the \
+             `pac-engine-wasm2c` feature)"
                 .into(),
         )),
     }
@@ -336,16 +369,25 @@ mod tests {
     use super::*;
 
     fn eval_with(kind: PacBackendKind, pac: &str, url: &str) -> Result<Vec<ProxyKind>> {
-        let evaluator = PacEvaluator::new(Duration::from_secs(2), kind);
+        // Generous caller-side timeout: it is only an upper bound (the call
+        // returns as soon as the worker replies), and the wasm2c backend
+        // under qemu in debug CI builds needs several seconds per call.
+        let evaluator = PacEvaluator::new(Duration::from_secs(60), kind);
         let script: Arc<str> = Arc::from(pac);
         evaluator.find_proxy(&script, &Url::parse(url).unwrap(), None)
     }
 
     /// The backends compiled into this build; unit tests run against all.
     fn kinds() -> Vec<PacBackendKind> {
-        let mut kinds = vec![PacBackendKind::Native];
+        let mut kinds = Vec::new();
+        if cfg!(feature = "pac-engine") {
+            kinds.push(PacBackendKind::Native);
+        }
         if cfg!(feature = "pac-engine-wasmtime") {
             kinds.push(PacBackendKind::Wasmtime);
+        }
+        if cfg!(feature = "pac-engine-wasm2c") {
+            kinds.push(PacBackendKind::Wasm2c);
         }
         kinds
     }
@@ -366,7 +408,10 @@ mod tests {
     #[test]
     fn conditional_pac_and_script_switch() {
         for kind in kinds() {
-            let evaluator = PacEvaluator::new(Duration::from_secs(2), kind);
+            // Generous caller-side timeout: it is only an upper bound (the call
+            // returns as soon as the worker replies), and the wasm2c backend
+            // under qemu in debug CI builds needs several seconds per call.
+            let evaluator = PacEvaluator::new(Duration::from_secs(60), kind);
             let pac_a: Arc<str> = Arc::from(
                 "function FindProxyForURL(url, host) {\
                    if (dnsDomainIs(host, '.corp.example.com')) return 'PROXY p:3128; DIRECT';\
@@ -433,7 +478,10 @@ mod tests {
     #[test]
     fn myip_override() {
         for kind in kinds() {
-            let evaluator = PacEvaluator::new(Duration::from_secs(2), kind);
+            // Generous caller-side timeout: it is only an upper bound (the call
+            // returns as soon as the worker replies), and the wasm2c backend
+            // under qemu in debug CI builds needs several seconds per call.
+            let evaluator = PacEvaluator::new(Duration::from_secs(60), kind);
             let script: Arc<str> = Arc::from(
                 "function FindProxyForURL(url, host) { return 'PROXY ' + myIpAddress() + ':1'; }",
             );
@@ -462,6 +510,40 @@ mod tests {
         .unwrap_err();
         match err {
             Error::PacEval(msg) => assert!(msg.contains("pac-engine-wasmtime"), "{msg}"),
+            other => panic!("expected PacEval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_without_feature_reports_unavailable() {
+        if cfg!(feature = "pac-engine") {
+            return;
+        }
+        let err = eval_with(
+            PacBackendKind::Native,
+            "function FindProxyForURL(url, host) { return 'DIRECT'; }",
+            "http://example.com/",
+        )
+        .unwrap_err();
+        match err {
+            Error::PacEval(msg) => assert!(msg.contains("pac-engine"), "{msg}"),
+            other => panic!("expected PacEval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm2c_without_feature_reports_unavailable() {
+        if cfg!(feature = "pac-engine-wasm2c") {
+            return;
+        }
+        let err = eval_with(
+            PacBackendKind::Wasm2c,
+            "function FindProxyForURL(url, host) { return 'DIRECT'; }",
+            "http://example.com/",
+        )
+        .unwrap_err();
+        match err {
+            Error::PacEval(msg) => assert!(msg.contains("pac-engine-wasm2c"), "{msg}"),
             other => panic!("expected PacEval, got {other:?}"),
         }
     }
