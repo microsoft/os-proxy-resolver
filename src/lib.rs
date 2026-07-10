@@ -60,14 +60,15 @@
 //! queueing. The worker protocol is process-agnostic so the evaluator can
 //! later move out-of-process entirely (Chromium-style sandboxing).
 //!
-//! With the `pac-engine-wasmtime` feature (opt-in, any platform), the cage
-//! gains a wall: [`ResolverOptions::pac_backend`] can select
-//! [`PacBackendKind::Wasmtime`], which runs the same QuickJS-NG compiled to
-//! WebAssembly inside a Wasmtime sandbox (ahead-of-time compiled — no JIT or
-//! compiler at runtime). A memory-safety bug in the C engine is then contained
-//! to the guest's linear memory, and the script's only reach into the host is
-//! the DNS/local-IP/log callbacks; runaway scripts are stopped by epoch
-//! interruption. See the "PAC cage" section of the README for details.
+//! With the `pac-engine-wasmtime` feature (enabled by default, any platform),
+//! the cage gains a wall: [`ResolverOptions::pac_backend`] selects
+//! [`PacBackendKind::Wasmtime`] by default, which runs the same QuickJS-NG
+//! compiled to WebAssembly inside a Wasmtime sandbox (ahead-of-time compiled
+//! — no JIT or compiler at runtime). A memory-safety bug in the C engine is
+//! then contained to the guest's linear memory, and the script's only reach
+//! into the host is the DNS/local-IP/log callbacks; runaway scripts are
+//! stopped by epoch interruption. See the "PAC cage" section of the README for
+//! details.
 //!
 //! # Change notification
 //!
@@ -90,15 +91,38 @@ mod env_cfg;
 #[cfg(not(windows))]
 mod fetch;
 mod notify;
-// The QuickJS PAC engine is always built off Windows; on Windows it is built
-// only for the `pac_bench` benchmark (feature `pac-engine`).
-#[cfg(any(not(windows), feature = "pac-engine"))]
+// The PAC subsystem is present whenever an embedded engine is compiled in, and
+// always off Windows (where at least one backend is required — see the
+// compile_error below). On Windows a backend-less build resolves PAC via
+// WinHTTP and omits this module entirely.
+#[cfg(any(
+    not(windows),
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasm2c"
+))]
 mod pac;
 mod platform;
 mod resolver;
 mod types;
 #[cfg(not(windows))]
 mod wpad;
+
+// Off Windows there is no OS PAC evaluator, so at least one embedded backend
+// must be selected. On Windows WinHTTP handles PAC, so a backend-less build is
+// fine there.
+#[cfg(all(
+    not(windows),
+    not(feature = "pac-engine"),
+    not(feature = "pac-engine-wasmtime"),
+    not(feature = "pac-engine-wasm2c")
+))]
+compile_error!(
+    "No PAC backend selected. On non-Windows platforms enable at least one of the \
+     `pac-engine` (native QuickJS), `pac-engine-wasmtime` (sandboxed Wasmtime) or \
+     `pac-engine-wasm2c` (sandboxed portable C) features. The default feature set \
+     enables `pac-engine-wasmtime`."
+);
 
 pub use notify::Subscription;
 pub use resolver::{ProxyResolver, ResolverOptions};

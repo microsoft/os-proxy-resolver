@@ -27,21 +27,32 @@
 //!
 //! # Timeouts and memory
 //!
-//! A runaway JS loop cannot be interrupted from inside the guest (the QuickJS
-//! interrupt handler would need a host clock on every poll); instead the
-//! engine uses Wasmtime *epoch interruption*: a process-global watchdog thread
-//! bumps the epoch every [`EPOCH_TICK`] while calls are in flight, and each
-//! call gets a deadline in ticks derived from the configured timeout. An
-//! expired deadline traps the guest, which surfaces as [`Error::Timeout`]; the
-//! store is then discarded and rebuilt (a trap can leave the guest's internal
-//! state corrupted). Memory is capped twice: QuickJS's own 64 MiB limit inside
-//! the guest, and a [`StoreLimits`] cap on the wasm linear memory itself.
+//! Two layers stop a runaway JS loop:
+//!
+//! 1. The guest's QuickJS interrupt handler polls the `host_should_interrupt`
+//!    import, which is answered here from the [`HostState`] deadline armed
+//!    around every call. This unwinds *cleanly* (QuickJS raises its normal
+//!    uncatchable interrupt exception, the guest reports
+//!    [`abi::STATUS_TIMEOUT`]), so the instance stays usable. It is also the
+//!    only mechanism the wasm2c backend has, which is why it lives in the
+//!    shared guest.
+//! 2. Wasmtime *epoch interruption* as a backstop for loops that never reach
+//!    a QuickJS interrupt poll (e.g. a bug looping in the interpreter's C
+//!    code): a process-global watchdog thread bumps the epoch every
+//!    [`EPOCH_TICK`] while calls are in flight, and an expired deadline traps
+//!    the guest. A trap tears the guest mid-execution, so the store is then
+//!    discarded and rebuilt.
+//!
+//! Memory is capped twice: QuickJS's own 64 MiB limit inside the guest, and a
+//! [`StoreLimits`] cap on the wasm linear memory itself.
 
-#[allow(dead_code)] // shared with the guest, which uses the full set
-mod abi;
+use super::wasm_abi as abi;
+use super::wasm_host::{
+    clock_nanos, fill_pseudo_random, status_to_result, WASI_EBADF, WASI_SUCCESS,
+};
 
 use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use wasmtime::{
     Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
@@ -87,6 +98,10 @@ struct GuestInstance {
     free: TypedFunc<(u32, u32), ()>,
     load: TypedFunc<(u32, u32), u64>,
     find_proxy: TypedFunc<(u32, u32, u32, u32), u64>,
+    /// Set when the last call ended in a wasm trap (epoch interrupt, guest
+    /// abort, ...). Unlike a clean `STATUS_TIMEOUT` unwind, a trap leaves the
+    /// guest's internal state unusable, so the engine must rebuild.
+    trapped: bool,
 }
 
 /// Log sink shared between the engine (for replay after rebuilds) and the
@@ -130,10 +145,10 @@ impl super::PacBackend for WasmtimePacEngine {
         self.script = Some(script.to_string());
         self.poisoned = false;
         let result = self.guest.load(script, self.timeout);
-        if let Err(e) = &result {
-            if matches!(e, Error::Timeout | Error::Internal(_)) {
-                self.poisoned = true;
-            }
+        // A trap tears the guest mid-execution; an Internal error leaves it in
+        // an unknown state. A clean `STATUS_TIMEOUT` unwind does not poison.
+        if self.guest.trapped || matches!(&result, Err(Error::Internal(_))) {
+            self.poisoned = true;
         }
         result
     }
@@ -142,15 +157,16 @@ impl super::PacBackend for WasmtimePacEngine {
         if self.poisoned {
             self.rebuild()?;
         }
-        match self.guest.find_proxy(url, host, self.timeout) {
-            Err(Error::Timeout) => {
-                // The guest was stopped mid-execution; QuickJS's internal
-                // state may be inconsistent, so discard the whole instance.
-                self.poisoned = true;
-                Err(Error::Timeout)
-            }
-            other => other,
+        let result = self.guest.find_proxy(url, host, self.timeout);
+        if self.guest.trapped {
+            // Stopped mid-execution (epoch backstop or guest abort); QuickJS's
+            // internal state may be inconsistent, discard the whole instance.
+            // (A deadline enforced via the guest's own interrupt handler
+            // returns Error::Timeout *without* the trap flag and needs no
+            // rebuild.)
+            self.poisoned = true;
         }
+        result
     }
 
     fn set_my_ip(&mut self, ip: Option<std::net::IpAddr>) {
@@ -261,6 +277,7 @@ impl GuestInstance {
             free,
             load,
             find_proxy,
+            trapped: false,
         })
     }
 
@@ -290,25 +307,39 @@ impl GuestInstance {
         self.unpack(packed?)
     }
 
-    /// Runs one guest call under the epoch watchdog with a deadline derived
-    /// from `timeout`, mapping an epoch trap to [`Error::Timeout`].
+    /// Runs one guest call with the [`HostState`] deadline armed (answering
+    /// the guest's `host_should_interrupt` polls) and the epoch watchdog as
+    /// backstop, mapping an epoch trap to [`Error::Timeout`] and recording
+    /// whether the call ended in a trap.
     fn with_deadline<R>(
         &mut self,
         timeout: Duration,
         call: impl FnOnce(&GuestFuncs, &mut Store<StoreData>) -> Result<R, wasmtime::Error>,
     ) -> Result<R, Error> {
+        self.trapped = false;
         self.store.set_epoch_deadline(ticks_for(timeout));
+        // Arms `HostState::deadline`; `host_should_interrupt` reads it. The
+        // engine keeps `HostState::timeout` in sync via `set_timeout`.
+        self.store.data().host.begin_call();
         let funcs = GuestFuncs {
             load: self.load.clone(),
             find_proxy: self.find_proxy.clone(),
         };
-        let _guard = EpochGuard::begin();
-        call(&funcs, &mut self.store).map_err(|e| {
-            if e.downcast_ref::<Trap>() == Some(&Trap::Interrupt) {
-                Error::Timeout
-            } else {
-                Error::Internal(format!("PAC guest call failed: {e}"))
+        let result = {
+            let _guard = EpochGuard::begin();
+            call(&funcs, &mut self.store)
+        };
+        self.store.data().host.end_call();
+        result.map_err(|e| match e.downcast_ref::<Trap>() {
+            Some(trap) => {
+                self.trapped = true;
+                if *trap == Trap::Interrupt {
+                    Error::Timeout
+                } else {
+                    Error::Internal(format!("PAC guest call trapped: {e}"))
+                }
             }
+            None => Error::Internal(format!("PAC guest call failed: {e}")),
         })
     }
 
@@ -337,15 +368,7 @@ impl GuestInstance {
         self.memory
             .read(&self.store, ptr, &mut buf)
             .map_err(internal("read guest result"))?;
-        let payload = String::from_utf8_lossy(&buf[1..]).into_owned();
-        match buf[0] {
-            abi::STATUS_OK => Ok(payload),
-            abi::STATUS_SCRIPT_SYNTAX => Err(Error::ScriptSyntax(payload)),
-            abi::STATUS_FUNCTION_MISSING => Err(Error::FunctionMissing(payload)),
-            abi::STATUS_JS_EXCEPTION => Err(Error::JsException(payload)),
-            abi::STATUS_RETURNED_NON_STRING => Err(Error::ReturnedNonString(payload)),
-            _ => Err(Error::Internal(payload)),
-        }
+        status_to_result(&buf)
     }
 }
 
@@ -377,6 +400,10 @@ fn global_engine() -> Result<&'static Engine, Error> {
         .get_or_init(|| {
             let mut config = Config::new();
             config.epoch_interruption(true);
+            // Must match build.rs: no CoW memory images (qemu-user, which
+            // runs the aarch64 CI tests, cannot seal memfds, and this crate
+            // instantiates rarely enough that CoW is worthless here).
+            config.memory_init_cow(false);
             Engine::new(&config).map_err(|e| e.to_string())
         })
         .as_ref()
@@ -550,6 +577,17 @@ fn define_pac_host_imports(linker: &mut Linker<StoreData>) -> Result<(), wasmtim
             Ok(())
         },
     )?;
+    linker.func_wrap(
+        abi::HOST_MODULE,
+        "host_should_interrupt",
+        |caller: Caller<'_, StoreData>| -> i32 {
+            // Polled by the guest's QuickJS interrupt handler; runs on the
+            // calling (worker) thread, so reading the Cell-based deadline is
+            // safe. Nonzero aborts JS execution -> STATUS_TIMEOUT.
+            let deadline = caller.data().host.deadline.get();
+            deadline.is_some_and(|d| Instant::now() >= d) as i32
+        },
+    )?;
     Ok(())
 }
 
@@ -565,8 +603,6 @@ fn define_pac_host_imports(linker: &mut Linker<StoreData>) -> Result<(), wasmtim
 // `Math.random()` and QuickJS hash seeds inside the sandbox).
 
 const WASI_MODULE: &str = "wasi_snapshot_preview1";
-const WASI_SUCCESS: i32 = 0;
-const WASI_EBADF: i32 = 8;
 
 fn define_wasi_stubs(linker: &mut Linker<StoreData>) -> Result<(), wasmtime::Error> {
     linker.func_wrap(
@@ -628,19 +664,7 @@ fn define_wasi_stubs(linker: &mut Linker<StoreData>) -> Result<(), wasmtime::Err
          _precision: i64,
          out: i32|
          -> Result<i32, wasmtime::Error> {
-            static MONOTONIC_START: OnceLock<Instant> = OnceLock::new();
-            let nanos: u64 = match id {
-                // CLOCK_REALTIME: civil time for Date / dateRange().
-                0 => SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0),
-                // CLOCK_MONOTONIC.
-                _ => MONOTONIC_START
-                    .get_or_init(Instant::now)
-                    .elapsed()
-                    .as_nanos() as u64,
-            };
+            let nanos = clock_nanos(id as u32);
             let memory = guest_memory(&mut caller)?;
             memory.write(&mut caller, out as usize, &nanos.to_le_bytes())?;
             Ok(WASI_SUCCESS)
@@ -694,29 +718,4 @@ fn define_wasi_stubs(linker: &mut Linker<StoreData>) -> Result<(), wasmtime::Err
         },
     )?;
     Ok(())
-}
-
-/// splitmix64, seeded once per process. Non-cryptographic by design — inside
-/// the sandbox it only serves `Math.random()` and QuickJS hash seeds.
-fn fill_pseudo_random(buf: &mut [u8]) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STATE: AtomicU64 = AtomicU64::new(0);
-    static SEED: OnceLock<u64> = OnceLock::new();
-    let seed = *SEED.get_or_init(|| {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x9e37_79b9_7f4a_7c15)
-            ^ (&STATE as *const _ as u64)
-    });
-    STATE
-        .compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed)
-        .ok();
-    for chunk in buf.chunks_mut(8) {
-        let mut z = STATE.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^= z >> 31;
-        chunk.copy_from_slice(&z.to_le_bytes()[..chunk.len()]);
-    }
 }

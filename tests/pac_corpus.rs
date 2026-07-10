@@ -5,11 +5,16 @@
 
 //! proxytester-style corpus: (pac file, url) -> expected proxy list. Catches
 //! drift in the built-in PAC engine builtins cheaply. Runs against every
-//! compiled-in backend — the native engine and (with the
-//! `pac-engine-wasmtime` feature) the sandboxed Wasmtime engine, which must
-//! agree on every case.
+//! compiled-in backend — the native engine (`pac-engine`), the sandboxed
+//! Wasmtime engine (`pac-engine-wasmtime`) and/or the portable wasm2c engine
+//! (`pac-engine-wasm2c`) — which must agree on every case.
 
-#![cfg(any(not(windows), feature = "pac-engine"))]
+#![cfg(any(
+    not(windows),
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasm2c"
+))]
 
 use os_proxy_resolver::{PacBackendKind, ProxyKind, ProxyResolver, ResolverOptions};
 use std::sync::OnceLock;
@@ -17,23 +22,40 @@ use std::sync::OnceLock;
 fn resolver_for(kind: PacBackendKind) -> ProxyResolver {
     let mut options = ResolverOptions::default();
     options.pac_backend = kind;
+    // Upper bound only (calls return as soon as the worker replies); the
+    // default 5s is too tight for the wasm2c backend under qemu in debug CI
+    // builds.
+    options.pac_timeout = std::time::Duration::from_secs(60);
     ProxyResolver::with_options(options)
 }
 
 /// One resolver per compiled-in backend; process-wide like the engines'
 /// worker threads.
 fn resolvers() -> Vec<(PacBackendKind, &'static ProxyResolver)> {
-    static NATIVE: OnceLock<ProxyResolver> = OnceLock::new();
-    let mut resolvers = vec![(
-        PacBackendKind::Native,
-        NATIVE.get_or_init(|| resolver_for(PacBackendKind::Native)),
-    )];
+    #[allow(unused_mut)]
+    let mut resolvers: Vec<(PacBackendKind, &'static ProxyResolver)> = Vec::new();
+    #[cfg(feature = "pac-engine")]
+    {
+        static NATIVE: OnceLock<ProxyResolver> = OnceLock::new();
+        resolvers.push((
+            PacBackendKind::Native,
+            NATIVE.get_or_init(|| resolver_for(PacBackendKind::Native)),
+        ));
+    }
     #[cfg(feature = "pac-engine-wasmtime")]
     {
         static WASMTIME: OnceLock<ProxyResolver> = OnceLock::new();
         resolvers.push((
             PacBackendKind::Wasmtime,
             WASMTIME.get_or_init(|| resolver_for(PacBackendKind::Wasmtime)),
+        ));
+    }
+    #[cfg(feature = "pac-engine-wasm2c")]
+    {
+        static WASM2C: OnceLock<ProxyResolver> = OnceLock::new();
+        resolvers.push((
+            PacBackendKind::Wasm2c,
+            WASM2C.get_or_init(|| resolver_for(PacBackendKind::Wasm2c)),
         ));
     }
     resolvers

@@ -10,7 +10,12 @@
 //! its own worker, so the per-backend tests below don't interfere with each
 //! other either way.)
 
-#![cfg(any(not(windows), feature = "pac-engine"))]
+#![cfg(any(
+    not(windows),
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasm2c"
+))]
 
 use os_proxy_resolver::{Error, PacBackendKind, ProxyResolver, ResolverOptions};
 use std::time::{Duration, Instant};
@@ -48,15 +53,25 @@ fn hostile_infinite_loop(kind: PacBackendKind) {
     // all tests are done.
 }
 
+#[cfg(feature = "pac-engine")]
 #[test]
 fn hostile_infinite_loop_times_out_and_fails_fast() {
     hostile_infinite_loop(PacBackendKind::Native);
 }
 
-/// Same containment for the sandboxed backend, enforced by Wasmtime epoch
-/// interruption instead of the QuickJS interrupt handler.
+/// Same containment for the sandboxed backend, enforced by the guest's
+/// QuickJS interrupt handler with Wasmtime epoch interruption as backstop.
 #[cfg(feature = "pac-engine-wasmtime")]
 #[test]
 fn hostile_infinite_loop_times_out_and_fails_fast_wasmtime() {
     hostile_infinite_loop(PacBackendKind::Wasmtime);
+}
+
+/// Same containment for the wasm2c backend, which has no epoch interruption:
+/// the guest's QuickJS interrupt handler polling `host_should_interrupt` is
+/// the only in-engine deadline, and the caller-side wedge provides fail-fast.
+#[cfg(feature = "pac-engine-wasm2c")]
+#[test]
+fn hostile_infinite_loop_times_out_and_fails_fast_wasm2c() {
+    hostile_infinite_loop(PacBackendKind::Wasm2c);
 }

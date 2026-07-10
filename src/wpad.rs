@@ -10,9 +10,10 @@
 //! Strategy: take the DNS search domains from the OS resolver configuration
 //! (macOS `SCDynamicStore`, Linux `/etc/resolv.conf`), and for each, walk up
 //! the suffix (`wpad.a.b.example.com`, `wpad.b.example.com`,
-//! `wpad.example.com`) — never above the registrable-ish boundary (a
-//! candidate must keep at least two labels after `wpad.`, so `wpad.com` is
-//! never queried; WPAD walking into a TLD is a classic hijack vector).
+//! `wpad.example.com`) — never past the registrable-domain (eTLD+1) boundary
+//! as determined by the Public Suffix List, so `wpad.com` (and multi-label
+//! cases like `wpad.co.uk`) are never queried; WPAD walking into a public
+//! suffix is a classic hijack vector.
 //!
 //! Networks without WPAD must not stall every first request: each DNS probe
 //! gets a short timeout (Chromium uses ~100ms budgets here), the wpad.dat
@@ -52,6 +53,13 @@ fn discover_with_domains(
 }
 
 /// `wpad.` candidates from the search domains, deduplicated, order-preserving.
+///
+/// The suffix walk stops at the registrable domain (eTLD+1) as determined by
+/// the Public Suffix List, matching what browsers do: `wpad.example.com` is a
+/// candidate but `wpad.com` is not, and multi-label public suffixes such as
+/// `co.uk` are handled correctly (`wpad.co.uk` is never queried). Search
+/// domains that are themselves a public suffix (or otherwise have no
+/// registrable part) contribute no candidates.
 pub(crate) fn candidate_hosts(domains: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for domain in domains {
@@ -61,8 +69,15 @@ pub(crate) fn candidate_hosts(domains: &[String]) -> Vec<String> {
             .split('.')
             .filter(|l| !l.is_empty())
             .collect();
-        // Keep >= 2 labels after "wpad." — never query wpad.<tld>.
-        while labels.len() >= 2 {
+        // Registrable-domain (eTLD+1) label count for this suffix; `None` when
+        // the name has no registrable part (a bare public suffix, a single
+        // label, ...), in which case it contributes no candidates.
+        let Some(min_labels) = registrable_label_count(&labels) else {
+            continue;
+        };
+        // Walk up to, and including, the registrable domain; never into the
+        // public suffix itself.
+        while labels.len() >= min_labels {
             let host = format!("wpad.{}", labels.join("."));
             if !out.contains(&host) {
                 out.push(host);
@@ -71,6 +86,15 @@ pub(crate) fn candidate_hosts(domains: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Number of labels in the registrable domain (eTLD+1) of `labels`, per the
+/// Public Suffix List, or `None` when there is no registrable domain (the name
+/// is itself a public suffix, a single label, or otherwise unregistrable).
+fn registrable_label_count(labels: &[&str]) -> Option<usize> {
+    let name = labels.join(".");
+    let registrable = psl::domain_str(&name)?;
+    Some(registrable.split('.').filter(|l| !l.is_empty()).count())
 }
 
 fn search_domains() -> Vec<String> {
@@ -118,6 +142,20 @@ mod tests {
             candidate_hosts(&["example.com.".into()]),
             vec!["wpad.example.com"]
         );
+    }
+
+    #[test]
+    fn stops_at_registrable_domain_for_multi_label_suffix() {
+        // The old label-count heuristic wrongly walked into `wpad.co.uk`; with
+        // the Public Suffix List the walk stops at the registrable domain.
+        let got = candidate_hosts(&["eng.example.co.uk".into()]);
+        assert_eq!(got, vec!["wpad.eng.example.co.uk", "wpad.example.co.uk"]);
+    }
+
+    #[test]
+    fn bare_public_suffix_yields_nothing() {
+        assert!(candidate_hosts(&["co.uk".into()]).is_empty());
+        assert!(candidate_hosts(&["com".into()]).is_empty());
     }
 
     #[test]

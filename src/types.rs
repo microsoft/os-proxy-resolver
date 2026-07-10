@@ -37,19 +37,56 @@ impl fmt::Display for ProxyKind {
 /// Selects which embedded engine evaluates PAC scripts on the caged worker
 /// (see [`ResolverOptions::pac_backend`](crate::ResolverOptions)). Does not
 /// affect Windows' regular resolution path, which delegates PAC to WinHTTP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PacBackendKind {
     /// The in-process QuickJS-NG engine (C, compiled to native code). Built
     /// on macOS/Linux always, on Windows behind the `pac-engine` feature.
-    #[default]
     Native,
     /// The same QuickJS-NG engine compiled to WebAssembly and run inside a
     /// Wasmtime sandbox, so a memory-safety bug triggered by a hostile
-    /// PAC/WPAD script is contained to the guest's linear memory. Requires
-    /// the `pac-engine-wasmtime` feature; selecting it without that feature
-    /// makes PAC evaluation fail with [`Error::PacEval`].
+    /// PAC/WPAD script is contained to the guest's linear memory. This is the
+    /// default backend; it requires the `pac-engine-wasmtime` feature (enabled
+    /// by default). Selecting it without that feature makes PAC evaluation
+    /// fail with [`Error::PacEval`].
     Wasmtime,
+    /// The same WebAssembly guest as [`Wasmtime`](Self::Wasmtime), but
+    /// translated to portable C with WABT's `wasm2c` and compiled like any
+    /// other C code — the wasm sandbox for targets Wasmtime/Cranelift cannot
+    /// AOT-compile for (e.g. 32-bit armv7). Slower than the Wasmtime backend
+    /// (software bounds checks on every memory access), never the default.
+    /// Requires the `pac-engine-wasm2c` feature; selecting it without that
+    /// feature makes PAC evaluation fail with [`Error::PacEval`].
+    Wasm2c,
+}
+
+impl Default for PacBackendKind {
+    /// [`Wasmtime`](Self::Wasmtime) when the `pac-engine-wasmtime` feature is
+    /// enabled (the default feature set); otherwise [`Native`](Self::Native);
+    /// otherwise [`Wasm2c`](Self::Wasm2c) — so the default backend is always
+    /// one that is actually compiled in. `Wasm2c` is deliberately last: it is
+    /// the portability fallback, never preferred over the other two.
+    fn default() -> Self {
+        #[cfg(feature = "pac-engine-wasmtime")]
+        {
+            PacBackendKind::Wasmtime
+        }
+        #[cfg(all(
+            not(feature = "pac-engine-wasmtime"),
+            any(feature = "pac-engine", not(feature = "pac-engine-wasm2c"))
+        ))]
+        {
+            PacBackendKind::Native
+        }
+        #[cfg(all(
+            not(feature = "pac-engine-wasmtime"),
+            not(feature = "pac-engine"),
+            feature = "pac-engine-wasm2c"
+        ))]
+        {
+            PacBackendKind::Wasm2c
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

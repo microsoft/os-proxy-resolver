@@ -44,9 +44,10 @@ pub struct ResolverOptions {
     pub config_ttl: Duration,
     /// Which embedded engine evaluates PAC scripts (macOS/Linux resolution,
     /// [`ProxyResolver::evaluate_pac`], and the non-WinHTTP paths of
-    /// [`ProxyResolver::evaluate_pac_source`]). The default is the in-process
-    /// native engine; [`PacBackendKind::Wasmtime`] selects the sandboxed
-    /// WebAssembly engine and requires the `pac-engine-wasmtime` feature.
+    /// [`ProxyResolver::evaluate_pac_source`]). The default is the sandboxed
+    /// WebAssembly engine ([`PacBackendKind::Wasmtime`], which requires the
+    /// `pac-engine-wasmtime` feature, enabled by default);
+    /// [`PacBackendKind::Native`] selects the in-process native engine.
     pub pac_backend: PacBackendKind,
 }
 
@@ -85,13 +86,23 @@ struct Inner {
     _watcher: platform::Watcher,
     config_cache: Mutex<Option<ConfigCache>>,
     retry: Mutex<HashMap<ProxyKind, Instant>>,
-    #[cfg(any(not(windows), feature = "pac-engine"))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasm2c"
+    ))]
     pac: OnceLock<crate::pac::PacEvaluator>,
     #[cfg(not(windows))]
     pac_cache: Mutex<Option<PacScriptCache>>,
     #[cfg(not(windows))]
     wpad_cache: Mutex<Option<WpadCache>>,
-    #[cfg(any(not(windows), feature = "pac-engine"))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasm2c"
+    ))]
     my_ip: Mutex<Option<(Instant, Option<String>)>>,
     #[cfg(windows)]
     winhttp: OnceLock<Option<platform::WinHttpResolver>>,
@@ -148,13 +159,23 @@ impl ProxyResolver {
                 _watcher: watcher,
                 config_cache: Mutex::new(None),
                 retry: Mutex::new(HashMap::new()),
-                #[cfg(any(not(windows), feature = "pac-engine"))]
+                #[cfg(any(
+                    not(windows),
+                    feature = "pac-engine",
+                    feature = "pac-engine-wasmtime",
+                    feature = "pac-engine-wasm2c"
+                ))]
                 pac: OnceLock::new(),
                 #[cfg(not(windows))]
                 pac_cache: Mutex::new(None),
                 #[cfg(not(windows))]
                 wpad_cache: Mutex::new(None),
-                #[cfg(any(not(windows), feature = "pac-engine"))]
+                #[cfg(any(
+                    not(windows),
+                    feature = "pac-engine",
+                    feature = "pac-engine-wasmtime",
+                    feature = "pac-engine-wasm2c"
+                ))]
                 my_ip: Mutex::new(None),
                 #[cfg(windows)]
                 winhttp: OnceLock::new(),
@@ -232,7 +253,12 @@ impl ProxyResolver {
     /// [`evaluate_pac_source`](Self::evaluate_pac_source) to load one from a
     /// path or URL. Runs on the caged evaluator thread with the same
     /// sanitization and hard timeout as regular resolution.
-    #[cfg(any(not(windows), feature = "pac-engine"))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasm2c"
+    ))]
     pub fn evaluate_pac(&self, script: &str, url: &Url) -> Result<Vec<ProxyKind>> {
         let script: Arc<str> = Arc::from(script);
         self.pac_evaluator().find_proxy(&script, url, self.my_ip())
@@ -370,7 +396,12 @@ impl ProxyResolver {
         vec![ProxyKind::Direct]
     }
 
-    #[cfg(any(not(windows), feature = "pac-engine"))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasm2c"
+    ))]
     fn pac_evaluator(&self) -> &crate::pac::PacEvaluator {
         self.inner.pac.get_or_init(|| {
             crate::pac::PacEvaluator::new(
@@ -462,7 +493,12 @@ impl ProxyResolver {
     /// Best-effort local IP for PAC `myIpAddress()`, so the engine doesn't
     /// fall back to resolving the hostname (slow, often wrong on multi-homed
     /// machines). A connected UDP socket never sends a packet.
-    #[cfg(any(not(windows), feature = "pac-engine"))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasm2c"
+    ))]
     fn my_ip(&self) -> Option<String> {
         let mut cached = lock(&self.inner.my_ip);
         if let Some((at, ip)) = cached.as_ref() {

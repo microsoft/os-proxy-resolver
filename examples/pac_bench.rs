@@ -13,16 +13,22 @@
 //!   the in-process QuickJS-NG engine. Always built off Windows; on Windows
 //!   only with `--features pac-engine`.
 //! * **wasmtime** — the same QuickJS-NG compiled to WebAssembly and run in a
-//!   Wasmtime sandbox (`--features pac-engine-wasmtime`, any platform),
-//!   selected via [`ResolverOptions::pac_backend`].
+//!   Wasmtime sandbox (`--features pac-engine-wasmtime`, any platform
+//!   Cranelift can AOT-compile for), selected via
+//!   [`ResolverOptions::pac_backend`].
+//! * **wasm2c** — the same wasm guest translated to portable C with WABT's
+//!   `wasm2c` (`--features pac-engine-wasm2c`, any platform with a C
+//!   compiler, including 32-bit armv7).
 //!
-//! `native` and `wasmtime` run byte-identical engine + helper sources, so the
-//! cross-check requires them to agree **exactly** on every URL and the
-//! process exits non-zero on any diff. WinHTTP is allowed to differ (it e.g.
-//! drops a trailing DIRECT); its diffs are reported but not fatal.
+//! `native`, `wasmtime` and `wasm2c` run byte-identical engine + helper
+//! sources, so the cross-check requires them to agree **exactly** on every
+//! URL and the process exits non-zero on any diff. WinHTTP is allowed to
+//! differ (it e.g. drops a trailing DIRECT); its diffs are reported but not
+//! fatal.
 //!
 //! ```text
-//! cargo run --release --example pac_bench --features "pac-engine pac-engine-wasmtime"
+//! cargo run --release --example pac_bench \
+//!     --features "pac-engine pac-engine-wasmtime pac-engine-wasm2c"
 //! cargo run --release --example pac_bench --features pac-engine -- \
 //!     --iterations 5000 --pac-script my.pac https://a.example/ http://b.corp/
 //! ```
@@ -31,7 +37,11 @@
 //! `127.0.0.1` HTTP endpoint (WinHTTP only loads PAC over http(s)); all
 //! engines still evaluate identical input.
 
-#[cfg(any(not(windows), feature = "pac-engine"))]
+#[cfg(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasm2c"
+))]
 use os_proxy_resolver::{PacBackendKind, ResolverOptions};
 use os_proxy_resolver::{ProxyKind, ProxyResolver};
 use std::time::{Duration, Instant};
@@ -148,7 +158,7 @@ fn backends(script: &str) -> Vec<Backend> {
         });
     }
 
-    #[cfg(any(not(windows), feature = "pac-engine"))]
+    #[cfg(feature = "pac-engine")]
     {
         let mut options = ResolverOptions::default();
         options.pac_backend = PacBackendKind::Native;
@@ -169,6 +179,19 @@ fn backends(script: &str) -> Vec<Backend> {
         let script = script.to_string();
         backends.push(Backend {
             label: "wasmtime",
+            exact: true,
+            call: Box::new(move |u| resolver.evaluate_pac(&script, u).map_err(|e| e.to_string())),
+        });
+    }
+
+    #[cfg(feature = "pac-engine-wasm2c")]
+    {
+        let mut options = ResolverOptions::default();
+        options.pac_backend = PacBackendKind::Wasm2c;
+        let resolver = ProxyResolver::with_options(options);
+        let script = script.to_string();
+        backends.push(Backend {
+            label: "wasm2c",
             exact: true,
             call: Box::new(move |u| resolver.evaluate_pac(&script, u).map_err(|e| e.to_string())),
         });
@@ -228,15 +251,15 @@ fn main() {
     if backends.is_empty() {
         println!(
             "no PAC backend compiled in — build with `--features pac-engine` \
-             (and/or `pac-engine-wasmtime`)."
+             (and/or `pac-engine-wasmtime`, `pac-engine-wasm2c`)."
         );
         return;
     }
 
     // Cross-check all backends on each URL before timing, so divergences
     // (e.g. WinHTTP dropping a trailing DIRECT) are reported up front. The
-    // `exact` backends (native, wasmtime) run byte-identical engine sources
-    // and MUST agree; anything else is a bug in the wasm backend.
+    // `exact` backends (native, wasmtime, wasm2c) run byte-identical engine
+    // sources and MUST agree; anything else is a bug in a wasm backend.
     let exact_diffs = cross_check(&backends, &urls);
 
     let mut stats: Vec<Stats> = Vec::new();
@@ -250,7 +273,7 @@ fn main() {
     if exact_diffs > 0 {
         eprintln!();
         eprintln!(
-            "error: native and wasmtime backends diverged on {exact_diffs} URL(s) — \
+            "error: the embedded backends diverged on {exact_diffs} URL(s) — \
              they run identical engine sources, so this is a bug."
         );
         std::process::exit(1);

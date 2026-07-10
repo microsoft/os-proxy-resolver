@@ -14,7 +14,7 @@
 //! `pac_host` imports, where the same `HostState` methods as the native
 //! engine's FFI trampolines serve them.
 //!
-//! See `engine_wasmtime/abi.rs` (included below) for the ABI contract.
+//! See `src/pac/wasm_abi.rs` (included below) for the ABI contract.
 
 use std::cell::RefCell;
 
@@ -22,10 +22,11 @@ use javy::quickjs::convert::Coerced;
 use javy::quickjs::{Ctx, Error as JsError, FromJs, Function, Value};
 use javy::{Config, Runtime};
 
-// Single source of truth for the ABI, shared with the host backend.
+// Single source of truth for the ABI, shared with the host backends
+// (Wasmtime and wasm2c).
 mod abi {
     #![allow(dead_code)]
-    include!("../../src/pac/engine_wasmtime/abi.rs");
+    include!("../../src/pac/wasm_abi.rs");
 }
 use abi::*;
 
@@ -83,6 +84,12 @@ extern "C" {
     fn host_my_ip_ex() -> i32;
     fn host_take_result(dest: *mut u8);
     fn host_alert(ptr: *const u8, len: usize);
+    /// Polled from the QuickJS interrupt handler while JS executes; nonzero
+    /// aborts execution and the call reports [`STATUS_TIMEOUT`]. This is the
+    /// only timeout mechanism available to hosts without instruction-level
+    /// interruption (wasm2c); Wasmtime keeps epoch interruption as a backstop
+    /// on top.
+    fn host_should_interrupt() -> i32;
 }
 
 /// Fetches a host-staged result announced as `len` (see `abi::RESULT_NONE`).
@@ -106,6 +113,26 @@ thread_local! {
     /// Backing storage for the (ptr, len) result returned to the host; valid
     /// until the next exported call.
     static RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// Set by the interrupt handler when it aborts execution, so the deadline
+    /// abort can be told apart from a script exception (mirrors the native
+    /// backend's `HostState::interrupted`).
+    static INTERRUPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// QuickJS interrupt callback (installed once per runtime): polls the host
+/// deadline. Registered through the raw `qjs` bindings because Javy's
+/// [`Runtime`] does not expose the inner [`javy::quickjs::Runtime`].
+unsafe extern "C" fn interrupt_handler(
+    _rt: *mut javy::quickjs::qjs::JSRuntime,
+    _opaque: *mut std::ffi::c_void,
+) -> std::ffi::c_int {
+    // SAFETY: plain host import with no arguments.
+    if unsafe { host_should_interrupt() } != 0 {
+        INTERRUPTED.with(|i| i.set(true));
+        1
+    } else {
+        0
+    }
 }
 
 /// Stores `status` + `payload` in the result buffer and packs its address.
@@ -189,6 +216,7 @@ pub unsafe extern "C" fn pac_find_proxy(
 }
 
 fn load_impl(script: &str) -> (u8, String) {
+    INTERRUPTED.with(|i| i.set(false));
     // A new script gets a pristine runtime, exactly like the native worker
     // (which rebuilds its PacEngine per load) — no stale globals survive.
     let runtime = match build_runtime() {
@@ -208,6 +236,7 @@ fn load_impl(script: &str) -> (u8, String) {
 }
 
 fn find_proxy_impl(url: &str, host: &str) -> (u8, String) {
+    INTERRUPTED.with(|i| i.set(false));
     ENGINE.with(|e| {
         let engine = e.borrow();
         let Some(runtime) = engine.as_ref() else {
@@ -252,6 +281,15 @@ fn build_runtime() -> Result<Runtime, String> {
     runtime
         .context()
         .with(|ctx| -> Result<(), String> {
+            // SAFETY: the context (and its runtime) is live for the duration
+            // of the call; the handler is a plain function with no state.
+            unsafe {
+                javy::quickjs::qjs::JS_SetInterruptHandler(
+                    javy::quickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()),
+                    Some(interrupt_handler),
+                    std::ptr::null_mut(),
+                );
+            }
             register_natives(&ctx).map_err(|e| js_error_text(&ctx, e))?;
             let install = |source: &str, what: &str| {
                 ctx.eval::<Value, _>(source.as_bytes())
@@ -314,6 +352,12 @@ fn register_natives(ctx: &Ctx<'_>) -> Result<(), JsError> {
 /// backend's `error_from_exception` (message plus stack when available,
 /// `SyntaxError` classified separately during load).
 fn error_from_js(ctx: &Ctx<'_>, error: JsError, classify_syntax: bool) -> (u8, String) {
+    // A deadline abort surfaces as an (uncatchable) exception; report it as a
+    // timeout instead, mirroring the native backend's `error_from_exception`.
+    if INTERRUPTED.with(|i| i.get()) {
+        let _ = ctx.catch(); // drain the pending exception
+        return (STATUS_TIMEOUT, String::new());
+    }
     if !matches!(error, JsError::Exception) {
         return (STATUS_INTERNAL, error.to_string());
     }

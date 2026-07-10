@@ -16,42 +16,72 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows: pure Rust — no C toolchain, no QuickJS.
+          # Each target builds/tests EVERY PAC backend it supports in one
+          # build (the test suite parametrizes over all compiled-in backends):
+          # native QuickJS + Wasmtime + wasm2c on the 64-bit targets, and
+          # native + wasm2c on armv7 (Wasmtime/Cranelift has no 32-bit ARM
+          # backend — wasm2c is what makes the sandbox reachable there). The
+          # shipped proxytester artifact is a separate single-backend build:
+          # Wasmtime everywhere, wasm2c on armv7 (`artifact_features`).
+          # Single-backend combinations (WinHTTP-only, native-only, ...) are
+          # additionally covered by the `pac-backend-variants` job below.
+          #
+          # The native engine needs a C toolchain for the QuickJS sources
+          # (MSVC on Windows, `cross` images on ARM Linux); wasm2c needs the
+          # pinned `wasm2c` binary (installed below; the cross containers get
+          # it via Cross.toml pre-build hooks).
+
+          # Windows (WinHTTP still handles normal resolution).
           - name: windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
             run_tests: true
           - name: windows arm64
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
             run_tests: true
 
-          # macOS: native runners provide the C toolchain for QuickJS.
+          # macOS.
           - name: macos arm64
             os: macos-latest
             target: aarch64-apple-darwin
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
             run_tests: true
           - name: macos x64
             os: macos-15-intel
             target: x86_64-apple-darwin
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
             run_tests: true
 
-          # Linux x86_64: native.
+          # Linux x86_64.
           - name: linux x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
             run_tests: true
 
-          # Linux ARM: cross — its images ship the C cross-toolchain
-          # QuickJS needs, and run tests under qemu.
+          # Linux aarch64 via cross (tests run under qemu).
           - name: linux aarch64
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
             use_cross: true
             run_tests: true
+          # Linux armv7: no Wasmtime (no Cranelift backend for 32-bit ARM);
+          # native + wasm2c, and the shipped artifact uses the wasm2c sandbox.
           - name: linux armv7
             os: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasm2c"'
             use_cross: true
             run_tests: true
 
@@ -69,21 +99,68 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # The pinned wasm2c for the host build. No macOS x64 release asset
+      # exists; Homebrew currently ships exactly 1.0.41 there (build.rs
+      # verifies the version either way and fails loudly on drift). On Windows
+      # the binary is passed by explicit native path (not PATH lookup) —
+      # windows-11-arm runs the x64 binary through Windows' x64 emulation.
+      - name: Install wasm2c (WABT 1.0.41)
+        if: ${{ !matrix.use_cross }}
+        run: |
+          set -e
+          case "$RUNNER_OS-$(uname -m)" in
+            Linux-x86_64) asset="linux-x64" ;;
+            macOS-arm64) asset="macos-arm64" ;;
+            macOS-x86_64) asset="" ;;
+            Windows-*) asset="windows-x64" ;;
+            *) echo "unexpected runner $RUNNER_OS-$(uname -m)"; exit 1 ;;
+          esac
+          if [ -z "$asset" ]; then
+            brew install wabt
+          else
+            mkdir -p "$HOME/wabt"
+            curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-$asset.tar.gz" \
+              | tar xz --strip-components=1 -C "$HOME/wabt"
+            bin="$HOME/wabt/bin/wasm2c"
+            if [ "$RUNNER_OS" = "Windows" ]; then bin="$(cygpath -w "$bin.exe")"; fi
+            echo "OS_PROXY_RESOLVER_WASM2C=$bin" >> "$GITHUB_ENV"
+            "$HOME/wabt/bin/wasm2c" --version
+          fi
+        shell: bash
+
+      # The WABT release binaries need a newer glibc than the cross container
+      # images ship, so cross builds cannot run wasm2c themselves. Its output
+      # is target-independent C: generate it here on the host and point the
+      # containerized build at it (Cross.toml passes the variable through; the
+      # path is manifest-relative so it maps into the container).
+      - name: Pre-generate wasm2c C for the container (host wasm2c)
+        if: matrix.use_cross
+        run: |
+          set -e
+          mkdir -p "$HOME/wabt" pac-wasm-guest/generated
+          curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz" \
+            | tar xz --strip-components=1 -C "$HOME/wabt"
+          "$HOME/wabt/bin/wasm2c" --version
+          "$HOME/wabt/bin/wasm2c" pac-wasm-guest/pac_guest.wasm --module-name pac_guest \
+            -o pac-wasm-guest/generated/pac_guest.c
+          echo "OS_PROXY_RESOLVER_PAC_GUEST_C_DIR=pac-wasm-guest/generated" >> "$GITHUB_ENV"
+        shell: bash
+
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --locked
 
       - name: Build
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --target ${{ matrix.target }} --features tokio --examples
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --target ${{ matrix.target }} ${{ matrix.features }} --examples
         shell: bash
 
       - name: Test
         if: matrix.run_tests
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} --features tokio
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} ${{ matrix.features }}
         shell: bash
 
       - name: Build proxytester (release)
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} --example proxytester
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} ${{ matrix.artifact_features }} --example proxytester
         shell: bash
 
       - name: Stage proxytester artifact
@@ -94,8 +171,9 @@ jobs:
           esac
           stage="dist/proxytester-${{ matrix.target }}"
           mkdir -p "$stage"
-          # QuickJS is statically linked into the binary, so proxytester is
-          # self-contained (WinHTTP handles PAC on Windows).
+          # The PAC engine (Wasmtime + AOT guest; the wasm2c sandbox on armv7)
+          # is statically linked into the binary, so proxytester is
+          # self-contained (WinHTTP handles normal resolution on Windows).
           cp "target/${{ matrix.target }}/release/examples/proxytester${ext}" "$stage/"
         shell: bash
 
@@ -145,6 +223,9 @@ jobs:
       # These tests read the real OS proxy config after configuring it, so they
       # only run here (gated behind OS_PROXY_RESOLVER_OS_TESTS). On Linux the
       # whole thing runs under a private D-Bus session.
+      # These tests only exercise OS-config reading, not PAC, but the crate
+      # still needs a backend to compile on non-Windows. Use the default
+      # (Wasmtime) backend, which needs no C toolchain.
       - name: Run OS round-trip tests
         env:
           OS_PROXY_RESOLVER_OS_TESTS: "1"
@@ -163,20 +244,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows times three engines: WinHTTP + native QuickJS + Wasmtime.
-          # The `pac-engine` feature additionally compiles the embedded QuickJS
-          # PAC engine on Windows (it is always built off Windows) — this is
-          # the only build that links QuickJS on Windows; production Windows
-          # stays WinHTTP-only / pure Rust.
+          # Every engine available per OS is timed and cross-checked on the
+          # same PAC script and URLs:
+          #   windows      : WinHTTP + native QuickJS + Wasmtime + wasm2c
+          #   macos/linux  : native QuickJS + Wasmtime + wasm2c
+          #   linux armv7  : native QuickJS + wasm2c (no Cranelift for 32-bit
+          #                  ARM), built with `cross` and run under qemu — the
+          #                  absolute numbers are qemu-skewed, the point is
+          #                  that the sandbox runs and the cross-check holds
+          #                  on a 32-bit target.
           - name: windows
             os: windows-latest
-          # macOS/Linux time two engines: native QuickJS + Wasmtime
-          # (`pac-engine` is a no-op off Windows). The native runners provide
-          # the C toolchain the QuickJS sources need.
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c
+            iterations: 3000
           - name: macos
             os: macos-latest
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c
+            iterations: 3000
           - name: linux
             os: ubuntu-latest
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c
+            iterations: 3000
+          - name: linux armv7 (qemu)
+            os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            use_cross: true
+            features: pac-engine pac-engine-wasm2c
+            iterations: 200
     steps:
       - uses: actions/checkout@v4
 
@@ -184,43 +278,163 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
+          if [ -n "${{ matrix.target }}" ]; then rustup target add ${{ matrix.target }}; fi
         shell: bash
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: pac-bench-${{ matrix.name }}
 
-      # Baseline build without the Wasmtime backend, to measure the
-      # binary-size delta the `pac-engine-wasmtime` feature contributes.
-      - name: Build pac_bench (without wasmtime backend)
+      # See the `test` job for the asset selection and cross rationale.
+      - name: Install wasm2c (WABT 1.0.41)
+        if: ${{ !matrix.use_cross }}
         run: |
-          cargo build --release --example pac_bench --features pac-engine
-          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
-          echo "PAC_BENCH_BASE_SIZE=$(wc -c < target/release/examples/pac_bench$ext | tr -d ' ')" >> "$GITHUB_ENV"
+          set -e
+          case "$RUNNER_OS-$(uname -m)" in
+            Linux-x86_64) asset="linux-x64" ;;
+            macOS-arm64) asset="macos-arm64" ;;
+            macOS-x86_64) asset="" ;;
+            Windows-*) asset="windows-x64" ;;
+            *) echo "unexpected runner $RUNNER_OS-$(uname -m)"; exit 1 ;;
+          esac
+          if [ -z "$asset" ]; then
+            brew install wabt
+          else
+            mkdir -p "$HOME/wabt"
+            curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-$asset.tar.gz" \
+              | tar xz --strip-components=1 -C "$HOME/wabt"
+            bin="$HOME/wabt/bin/wasm2c"
+            if [ "$RUNNER_OS" = "Windows" ]; then bin="$(cygpath -w "$bin.exe")"; fi
+            echo "OS_PROXY_RESOLVER_WASM2C=$bin" >> "$GITHUB_ENV"
+            "$HOME/wabt/bin/wasm2c" --version
+          fi
         shell: bash
 
-      # Correctness first: the full test suite against both embedded engines
+      - name: Pre-generate wasm2c C for the container (host wasm2c)
+        if: matrix.use_cross
+        run: |
+          set -e
+          mkdir -p "$HOME/wabt" pac-wasm-guest/generated
+          curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz" \
+            | tar xz --strip-components=1 -C "$HOME/wabt"
+          "$HOME/wabt/bin/wasm2c" --version
+          "$HOME/wabt/bin/wasm2c" pac-wasm-guest/pac_guest.wasm --module-name pac_guest \
+            -o pac-wasm-guest/generated/pac_guest.c
+          echo "OS_PROXY_RESOLVER_PAC_GUEST_C_DIR=pac-wasm-guest/generated" >> "$GITHUB_ENV"
+        shell: bash
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      # Three release builds of pac_bench with growing feature sets, recording
+      # the binary size of each so the per-backend size delta is explicit.
+      # (`--no-default-features` because the default set enables Wasmtime.)
+      - name: Measure binary-size deltas
+        run: |
+          set -e
+          CARGO="${{ matrix.use_cross && 'cross' || 'cargo' }}"
+          TARGET_FLAG="${{ matrix.target && format('--target {0}', matrix.target) || '' }}"
+          BIN="target/${{ matrix.target && format('{0}/', matrix.target) || '' }}release/examples/pac_bench"
+          [ "$RUNNER_OS" = "Windows" ] && BIN="$BIN.exe"
+          size_of() { wc -c < "$BIN" | tr -d ' '; }
+
+          $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio pac-engine"
+          base=$(size_of)
+          echo "pac_bench (pac-engine only)            : $base bytes"
+          if [[ "${{ matrix.features }}" == *pac-engine-wasmtime* ]]; then
+            $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio pac-engine pac-engine-wasmtime"
+            wt=$(size_of)
+            echo "pac_bench (+ pac-engine-wasmtime)      : $wt bytes (delta $((wt - base)))"
+          fi
+          $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio ${{ matrix.features }}"
+          full=$(size_of)
+          echo "pac_bench (all backends for this OS)   : $full bytes"
+          echo "wasm2c backend binary-size delta       : $((full - ${wt:-$base})) bytes"
+        shell: bash
+
+      # Correctness first: the full test suite against every embedded engine
       # (unit tests + PAC corpus + hostile-PAC timeout, each parametrized over
-      # the native and Wasmtime backends).
-      - name: Test both embedded PAC backends
-        run: cargo test --release --features "pac-engine pac-engine-wasmtime"
+      # all compiled-in backends).
+      - name: Test all embedded PAC backends
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --release ${{ matrix.target && format('--target {0}', matrix.target) || '' }} --no-default-features --features "tokio ${{ matrix.features }}"
         shell: bash
 
-      # Time every engine available on this OS on the same PAC script and
-      # URLs (WinHTTP on Windows only). pac_bench exits non-zero if the native
-      # and Wasmtime backends — which run byte-identical engine sources —
-      # disagree on any URL.
+      # pac_bench exits non-zero if the embedded backends — which run
+      # byte-identical engine sources — disagree on any URL.
       - name: Run PAC benchmark
-        run: cargo run --release --example pac_bench --features "pac-engine pac-engine-wasmtime" -- --iterations 3000
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} run --release ${{ matrix.target && format('--target {0}', matrix.target) || '' }} --example pac_bench --no-default-features --features "tokio ${{ matrix.features }}" -- --iterations ${{ matrix.iterations }}
         shell: bash
 
-      - name: Report wasmtime backend binary-size delta
+  pac-backend-variants:
+    name: PAC backend variant (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # WinHTTP-only pure-Rust Windows build: no embedded engine at all.
+          # Valid on Windows because WinHTTP handles PAC.
+          - name: windows WinHTTP-only (pure Rust)
+            os: windows-latest
+            features: --no-default-features --features tokio
+          # Native-only build (no wasm sandbox) on a 64-bit host.
+          - name: linux native-only
+            os: ubuntu-latest
+            features: --no-default-features --features "tokio pac-engine"
+          # Wasmtime-only (the default feature set): no C toolchain use at all.
+          - name: linux wasmtime-only
+            os: ubuntu-latest
+            features: --features tokio
+          # wasm2c-only: the sandbox without Wasmtime, as an armv7-style build
+          # would use, but tested on a fast 64-bit host.
+          - name: linux wasm2c-only
+            os: ubuntu-latest
+            features: --no-default-features --features "tokio pac-engine-wasm2c"
+            needs_wasm2c: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
         run: |
-          ext=""; [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
-          full=$(wc -c < target/release/examples/pac_bench$ext | tr -d ' ')
-          echo "pac_bench (pac-engine only)          : $PAC_BENCH_BASE_SIZE bytes"
-          echo "pac_bench (+ pac-engine-wasmtime)    : $full bytes"
-          echo "wasmtime backend binary-size delta   : $((full - PAC_BENCH_BASE_SIZE)) bytes"
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+        shell: bash
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: variant-${{ matrix.name }}
+      - name: Install wasm2c (WABT 1.0.41)
+        if: matrix.needs_wasm2c
+        run: |
+          mkdir -p "$HOME/wabt"
+          curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz" \
+            | tar xz --strip-components=1 -C "$HOME/wabt"
+          echo "$HOME/wabt/bin" >> "$GITHUB_PATH"
+        shell: bash
+      - name: Build and test
+        run: cargo test ${{ matrix.features }}
+        shell: bash
+
+  no-backend-is-a-compile-error:
+    name: no PAC backend is a compile error (non-Windows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+        shell: bash
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: no-backend
+      # Off Windows a backend is required; building with neither must fail.
+      - name: Assert `--no-default-features` fails to compile
+        run: |
+          if cargo build --no-default-features 2>/dev/null; then
+            echo "::error::expected a compile error with no PAC backend selected, but the build succeeded"
+            exit 1
+          fi
+          echo "OK: building with no PAC backend fails as expected"
         shell: bash
 
   electron-pac-bench:
@@ -281,6 +495,14 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
           rustup default stable
       - uses: Swatinem/rust-cache@v2
+      # `--all-features` includes pac-engine-wasm2c, whose build script runs
+      # the pinned wasm2c.
+      - name: Install wasm2c (WABT 1.0.41)
+        run: |
+          mkdir -p "$HOME/wabt"
+          curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-macos-arm64.tar.gz" \
+            | tar xz --strip-components=1 -C "$HOME/wabt"
+          echo "$HOME/wabt/bin" >> "$GITHUB_PATH"
       - run: cargo fmt --check
       - run: cargo clippy --all-features --all-targets -- -D warnings
       - run: cargo doc --no-deps --all-features
