@@ -16,15 +16,19 @@
 //!   Wasmtime sandbox (`--features pac-engine-wasmtime`, any platform
 //!   Cranelift can AOT-compile for), selected via
 //!   [`ResolverOptions::pac_backend`].
+//! * **wasmtime-jit** — the same Wasmtime sandbox with Cranelift compiled into
+//!   the runtime (`--features pac-engine-wasmtime-jit`), so the raw guest is
+//!   compiled when the process starts instead of AOT-compiled by `build.rs`.
 //! * **wasm2c** — the same wasm guest translated to portable C with WABT's
 //!   `wasm2c` (`--features pac-engine-wasm2c`, any platform with a C
 //!   compiler, including 32-bit armv7).
 //!
-//! `native`, `wasmtime` and `wasm2c` run byte-identical engine + helper
-//! sources, so the cross-check requires them to agree **exactly** on every
-//! URL and the process exits non-zero on any diff. WinHTTP is allowed to
-//! differ (it e.g. drops a trailing DIRECT); its diffs are reported but not
-//! fatal.
+//! All embedded backends run byte-identical engine + helper sources, so the
+//! cross-check requires them to agree **exactly** on every URL and the process
+//! exits non-zero on any diff. WinHTTP is allowed to differ (it e.g. drops a
+//! trailing DIRECT); its diffs are reported but not fatal. For CI builds that
+//! compile one backend per binary, `--backend` selects that path and
+//! `--results-file` emits deterministic TSV for cross-process comparison.
 //!
 //! ```text
 //! cargo run --release --example pac_bench \
@@ -82,12 +86,16 @@ const DEFAULT_URLS: &[&str] = &[
 struct Args {
     iterations: usize,
     pac_script: Option<String>,
+    backend: Option<String>,
+    results_file: Option<String>,
     urls: Vec<String>,
 }
 
 fn parse_args() -> Args {
     let mut iterations = 2000usize;
     let mut pac_script = None;
+    let mut backend = None;
+    let mut results_file = None;
     let mut urls = Vec::new();
 
     let mut args = std::env::args().skip(1);
@@ -103,6 +111,18 @@ fn parse_args() -> Args {
                 pac_script = Some(
                     args.next()
                         .unwrap_or_else(|| usage_error("--pac-script requires a value")),
+                );
+            }
+            "--backend" => {
+                backend = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage_error("--backend requires a value")),
+                );
+            }
+            "--results-file" => {
+                results_file = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage_error("--results-file requires a value")),
                 );
             }
             "-h" | "--help" => {
@@ -121,6 +141,8 @@ fn parse_args() -> Args {
     Args {
         iterations,
         pac_script,
+        backend,
+        results_file,
         urls,
     }
 }
@@ -250,7 +272,23 @@ fn main() {
         "  pac source : {}",
         args.pac_script.as_deref().unwrap_or("<built-in>")
     );
-    let backends = backends(&script);
+    let mut backends = backends(&script);
+    if let Some(requested) = &args.backend {
+        let available = backends
+            .iter()
+            .map(|backend| backend.label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        backends.retain(|backend| backend.label == requested);
+        if backends.is_empty() {
+            usage_error(&format!(
+                "backend {requested:?} is not compiled in (available: {available})"
+            ));
+        }
+    }
+    if args.results_file.is_some() && backends.len() != 1 {
+        usage_error("--results-file requires selecting exactly one backend with --backend");
+    }
     println!(
         "  backends   : {}",
         backends
@@ -272,9 +310,9 @@ fn main() {
 
     // Cross-check all backends on each URL before timing, so divergences
     // (e.g. WinHTTP dropping a trailing DIRECT) are reported up front. The
-    // `exact` backends (native, wasmtime, wasm2c) run byte-identical engine
-    // sources and MUST agree; anything else is a bug in a wasm backend.
-    let exact_diffs = cross_check(&backends, &urls);
+    // `exact` embedded backends run byte-identical engine sources and MUST
+    // agree; anything else is a bug in a wasm backend.
+    let exact_diffs = cross_check(&backends, &urls, args.results_file.as_deref());
 
     let mut stats: Vec<Stats> = Vec::new();
     for backend in &backends {
@@ -295,7 +333,16 @@ fn main() {
 }
 
 /// Returns the number of URLs on which the `exact` backends disagreed.
-fn cross_check(backends: &[Backend], urls: &[Url]) -> usize {
+fn cross_check(backends: &[Backend], urls: &[Url], results_file: Option<&str>) -> usize {
+    use std::io::Write;
+
+    let mut result_output = results_file.map(|path| {
+        let file = std::fs::File::create(path).unwrap_or_else(|e| {
+            eprintln!("error: cannot create results file {path}: {e}");
+            std::process::exit(1);
+        });
+        std::io::BufWriter::new(file)
+    });
     let mut diffs = 0;
     let mut exact_diffs = 0;
     for u in urls {
@@ -309,6 +356,12 @@ fn cross_check(backends: &[Backend], urls: &[Url]) -> usize {
                 (i, r)
             })
             .collect();
+        if let Some(output) = &mut result_output {
+            writeln!(output, "{u}\t{}", results[0].1).unwrap_or_else(|e| {
+                eprintln!("error: cannot write results file: {e}");
+                std::process::exit(1);
+            });
+        }
         let all_equal = results.windows(2).all(|w| w[0].1 == w[1].1);
         if !all_equal {
             diffs += 1;
@@ -326,7 +379,19 @@ fn cross_check(backends: &[Backend], urls: &[Url]) -> usize {
             exact_diffs += 1;
         }
     }
-    if diffs == 0 {
+    if let Some(output) = &mut result_output {
+        output.flush().unwrap_or_else(|e| {
+            eprintln!("error: cannot flush results file: {e}");
+            std::process::exit(1);
+        });
+    }
+    if backends.len() == 1 {
+        println!(
+            "result capture: {} evaluated all {} URLs",
+            backends[0].label,
+            urls.len()
+        );
+    } else if diffs == 0 {
         println!(
             "cross-check: all {} backends agree on all {} URLs",
             backends.len(),
@@ -523,12 +588,14 @@ fn serve_pac(script: String) -> String {
 
 fn print_usage() {
     eprintln!(
-        "usage: pac_bench [--iterations N] [--pac-script <path>] [<url>...]\n\
+        "usage: pac_bench [--iterations N] [--pac-script <path>]\n\
+         [--backend <name>] [--results-file <path>] [<url>...]\n\
          \n\
          Times every compiled-in PAC path (WinHTTP on Windows, the native\n\
-         QuickJS engine, and the sandboxed Wasmtime engine) on the same PAC\n\
-         script and URLs. Build with `--features \"pac-engine\n\
-         pac-engine-wasmtime\"` to include all engines."
+         QuickJS engine, Wasmtime AOT/JIT, and wasm2c) on the same PAC script\n\
+         and URLs. `--backend` times one compiled-in path. With exactly one\n\
+         selected backend, `--results-file` writes deterministic TSV rows for\n\
+         cross-process result comparison."
     );
 }
 

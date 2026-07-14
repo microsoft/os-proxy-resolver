@@ -244,10 +244,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Every engine available per OS is timed and cross-checked on the
-          # same PAC script and URLs:
-          #   windows      : WinHTTP + native QuickJS + Wasmtime + wasm2c
-          #   macos/linux  : native QuickJS + Wasmtime + wasm2c
+          # Every engine available per OS is built and timed separately on the
+          # same PAC script and URLs; their captured results are cross-checked
+          # across processes:
+          #   windows      : WinHTTP + native QuickJS + Wasmtime AOT/JIT + wasm2c
+          #   macos/linux  : native QuickJS + Wasmtime AOT/JIT + wasm2c
           #   linux armv7  : native QuickJS + wasm2c (no Cranelift for 32-bit
           #                  ARM), built with `cross` and run under qemu — the
           #                  absolute numbers are qemu-skewed, the point is
@@ -327,35 +328,80 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --locked
 
-      # One release build of pac_bench per backend, each with ONLY that
-      # backend compiled in — real deployments build a single backend, so
-      # absolute single-backend sizes are the meaningful comparison.
+      # Build pac_bench once per backend with ONLY that backend compiled in,
+      # then measure and immediately benchmark that exact artifact. Real
+      # deployments build one backend, so both its size and performance are
+      # more meaningful than a combined all-backends binary. Each process
+      # writes canonical URL/result rows; diffing those files preserves the
+      # previous combined binary's byte-for-byte embedded-engine cross-check.
       # (`--no-default-features` because the default set enables Wasmtime.)
-      - name: Measure single-backend binary sizes
+      - name: Build, measure, and benchmark each PAC backend
         run: |
           set -e
           CARGO="${{ matrix.use_cross && 'cross' || 'cargo' }}"
           TARGET_FLAG="${{ matrix.target && format('--target {0}', matrix.target) || '' }}"
           BIN="target/${{ matrix.target && format('{0}/', matrix.target) || '' }}release/examples/pac_bench"
           [ "$RUNNER_OS" = "Windows" ] && BIN="$BIN.exe"
+          RESULTS_DIR="target/pac-bench-results"
+          rm -rf "$RESULTS_DIR"
+          mkdir -p "$RESULTS_DIR"
           echo "pac_bench single-backend binary sizes:"
           for feature in ${{ matrix.features }}; do
+            case "$feature" in
+              pac-engine) backend="native" ;;
+              pac-engine-wasmtime) backend="wasmtime" ;;
+              pac-engine-wasm2c) backend="wasm2c" ;;
+              pac-engine-wasmtime-jit) backend="wasmtime-jit" ;;
+              *) echo "unknown PAC backend feature: $feature"; exit 1 ;;
+            esac
             $CARGO build --release --example pac_bench $TARGET_FLAG --no-default-features --features "tokio $feature"
             printf '  %-26s: %s bytes\n' "$feature" "$(wc -c < "$BIN" | tr -d ' ')"
+            echo
+            echo "pac_bench single-backend performance: $backend"
+            if [ "${{ matrix.use_cross }}" = "true" ]; then
+              # `cross run` sees the just-built target as fresh and only
+              # launches it under qemu; it does not rebuild the artifact.
+              $CARGO run --release --example pac_bench $TARGET_FLAG \
+                --no-default-features --features "tokio $feature" -- \
+                --backend "$backend" \
+                --results-file "$RESULTS_DIR/$backend.tsv" \
+                --iterations ${{ matrix.iterations }}
+            else
+              "$BIN" --backend "$backend" \
+                --results-file "$RESULTS_DIR/$backend.tsv" \
+                --iterations ${{ matrix.iterations }}
+            fi
           done
+
+          echo
+          echo "Cross-checking embedded PAC backend results:"
+          reference=""
+          for results in "$RESULTS_DIR"/*.tsv; do
+            if [ -z "$reference" ]; then
+              reference="$results"
+              continue
+            fi
+            diff -u "$reference" "$results"
+          done
+          echo "all embedded backends agree on all URLs"
+
+          # WinHTTP is part of every Windows binary regardless of embedded
+          # feature selection. Benchmark it once using the last artifact; it
+          # is intentionally excluded from the strict result diff because it
+          # may omit a trailing DIRECT fallback.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo
+            echo "pac_bench platform performance: winhttp"
+            "$BIN" --backend winhttp --iterations ${{ matrix.iterations }}
+          fi
         shell: bash
 
       # Correctness first: the full test suite against every embedded engine
       # (unit tests + PAC corpus + hostile-PAC timeout, each parametrized over
-      # all compiled-in backends).
+      # all compiled-in backends). Restrict targets so Cargo does not build a
+      # combined all-backends pac_bench example after the single-backend runs.
       - name: Test all embedded PAC backends
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --release ${{ matrix.target && format('--target {0}', matrix.target) || '' }} --no-default-features --features "tokio ${{ matrix.features }}"
-        shell: bash
-
-      # pac_bench exits non-zero if the embedded backends — which run
-      # byte-identical engine sources — disagree on any URL.
-      - name: Run PAC benchmark
-        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} run --release ${{ matrix.target && format('--target {0}', matrix.target) || '' }} --example pac_bench --no-default-features --features "tokio ${{ matrix.features }}" -- --iterations ${{ matrix.iterations }}
+        run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --release --lib --tests ${{ matrix.target && format('--target {0}', matrix.target) || '' }} --no-default-features --features "tokio ${{ matrix.features }}"
         shell: bash
 
   pac-backend-variants:
