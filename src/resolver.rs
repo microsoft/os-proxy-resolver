@@ -15,6 +15,12 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use url::Url;
 
+#[cfg(feature = "tokio")]
+use std::sync::Weak;
+
+#[cfg(feature = "tokio")]
+const ASYNC_RESOLUTION_QUEUE_CAPACITY: usize = 256;
+
 /// Tunables for a [`ProxyResolver`]. Construct with `Default::default()` and
 /// override fields as needed.
 #[derive(Debug, Clone)]
@@ -108,6 +114,12 @@ struct Inner {
     my_ip: Mutex<Option<(Instant, Option<String>)>>,
     #[cfg(windows)]
     winhttp: OnceLock<Option<platform::WinHttpResolver>>,
+    #[cfg(feature = "tokio")]
+    async_worker: OnceLock<std::result::Result<AsyncResolverWorker, String>>,
+    #[cfg(all(test, feature = "tokio"))]
+    async_resolution_starts: std::sync::atomic::AtomicUsize,
+    #[cfg(all(test, feature = "tokio"))]
+    async_resolution_delay: Mutex<Option<Duration>>,
 }
 
 struct ConfigCache {
@@ -131,6 +143,172 @@ struct WpadCache {
     at: Instant,
     /// `None` = no WPAD on this network (negative-cached).
     script: Option<Arc<str>>,
+}
+
+#[cfg(feature = "tokio")]
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct AsyncResolutionKey {
+    generation: u64,
+    url: String,
+}
+
+#[cfg(feature = "tokio")]
+type AsyncResolutionSender = tokio::sync::watch::Sender<Option<Result<Vec<ProxyKind>>>>;
+
+#[cfg(feature = "tokio")]
+struct AsyncResolutionRequest {
+    key: AsyncResolutionKey,
+    url: Url,
+}
+
+#[cfg(feature = "tokio")]
+struct AsyncSubmissionGuard {
+    key: AsyncResolutionKey,
+    inflight: Arc<Mutex<HashMap<AsyncResolutionKey, AsyncResolutionSender>>>,
+    armed: bool,
+}
+
+#[cfg(feature = "tokio")]
+impl AsyncSubmissionGuard {
+    fn new(
+        key: AsyncResolutionKey,
+        inflight: Arc<Mutex<HashMap<AsyncResolutionKey, AsyncResolutionSender>>>,
+    ) -> Self {
+        Self {
+            key,
+            inflight,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl Drop for AsyncSubmissionGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            lock(&self.inflight).remove(&self.key);
+        }
+    }
+}
+
+/// One blocking resolver thread per [`ProxyResolver`], created lazily by the
+/// async API. The in-flight map lets identical callers await the same result
+/// without occupying one blocking thread each; distinct targets queue on the
+/// single worker so blocking OS/PAC/WPAD work has fixed thread consumption.
+#[cfg(feature = "tokio")]
+struct AsyncResolverWorker {
+    tx: tokio::sync::mpsc::Sender<AsyncResolutionRequest>,
+    inflight: Arc<Mutex<HashMap<AsyncResolutionKey, AsyncResolutionSender>>>,
+}
+
+#[cfg(feature = "tokio")]
+impl AsyncResolverWorker {
+    fn new(inner: Weak<Inner>) -> std::result::Result<Self, String> {
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<AsyncResolutionRequest>(ASYNC_RESOLUTION_QUEUE_CAPACITY);
+        let inflight: Arc<Mutex<HashMap<AsyncResolutionKey, AsyncResolutionSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let worker_inflight = inflight.clone();
+        std::thread::Builder::new()
+            .name("os-proxy-resolver".to_string())
+            .spawn(move || {
+                while let Some(request) = rx.blocking_recv() {
+                    let result = match inner.upgrade() {
+                        Some(inner) => {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                #[cfg(all(test, feature = "tokio"))]
+                                {
+                                    use std::sync::atomic::Ordering;
+
+                                    inner.async_resolution_starts.fetch_add(1, Ordering::SeqCst);
+                                    if let Some(delay) = *lock(&inner.async_resolution_delay) {
+                                        std::thread::sleep(delay);
+                                    }
+                                }
+                                ProxyResolver { inner }.resolve_proxy(&request.url)
+                            }))
+                            .unwrap_or_else(|_| {
+                                Err(Error::Platform(
+                                    "proxy resolver worker panicked during resolution".to_string(),
+                                ))
+                            })
+                        }
+                        None => Err(Error::Platform(
+                            "proxy resolver was dropped during async resolution".to_string(),
+                        )),
+                    };
+                    if let Some(sender) = lock(&worker_inflight).get(&request.key).cloned() {
+                        let _ = sender.send(Some(result));
+                        lock(&worker_inflight).remove(&request.key);
+                    }
+                }
+            })
+            .map_err(|error| format!("failed to spawn proxy resolver worker: {error}"))?;
+        Ok(Self { tx, inflight })
+    }
+
+    async fn resolve(&self, generation: u64, url: &Url) -> Result<Vec<ProxyKind>> {
+        let mut key_url = url.clone();
+        key_url.set_fragment(None);
+        let _ = key_url.set_username("");
+        let _ = key_url.set_password(None);
+        let key = AsyncResolutionKey {
+            generation,
+            url: key_url.as_str().to_string(),
+        };
+        let (mut receiver, leader) = {
+            let mut inflight = lock(&self.inflight);
+            match inflight.get(&key) {
+                Some(sender) => (sender.subscribe(), false),
+                None => {
+                    let (sender, receiver) = tokio::sync::watch::channel(None);
+                    inflight.insert(key.clone(), sender);
+                    (receiver, true)
+                }
+            }
+        };
+
+        if leader {
+            // If this future is canceled while the bounded queue is full,
+            // remove its unresolved in-flight entry. Dropping the sender wakes
+            // followers with a closed-channel error so a later call can retry.
+            let mut submission = AsyncSubmissionGuard::new(key.clone(), self.inflight.clone());
+            if self
+                .tx
+                .send(AsyncResolutionRequest {
+                    key: key.clone(),
+                    url: url.clone(),
+                })
+                .await
+                .is_err()
+            {
+                let error = Error::Platform("proxy resolver worker is unavailable".to_string());
+                if let Some(sender) = lock(&self.inflight).remove(&key) {
+                    let _ = sender.send(Some(Err(error.clone())));
+                }
+                submission.disarm();
+                return Err(error);
+            }
+            submission.disarm();
+        }
+
+        let result = match receiver.wait_for(Option::is_some).await {
+            Ok(result) => match result.clone() {
+                Some(result) => result,
+                None => Err(Error::Platform(
+                    "proxy resolver worker returned no result".to_string(),
+                )),
+            },
+            Err(_) => Err(Error::Platform(
+                "proxy resolver worker stopped before returning a result".to_string(),
+            )),
+        };
+        result
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -183,6 +361,12 @@ impl ProxyResolver {
                 my_ip: Mutex::new(None),
                 #[cfg(windows)]
                 winhttp: OnceLock::new(),
+                #[cfg(feature = "tokio")]
+                async_worker: OnceLock::new(),
+                #[cfg(all(test, feature = "tokio"))]
+                async_resolution_starts: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(all(test, feature = "tokio"))]
+                async_resolution_delay: Mutex::new(None),
             }),
         }
     }
@@ -213,6 +397,28 @@ impl ProxyResolver {
         let config = self.os_config();
         let list = self.resolve_from_os(&config, url);
         Ok(self.demote_bad(list))
+    }
+
+    /// Resolve the ordered proxy list without blocking an async-runtime worker.
+    ///
+    /// One lazily-created background thread owns all blocking resolution for
+    /// this resolver. Concurrent calls for the same URL and configuration
+    /// generation await one shared result; distinct URLs queue on that thread.
+    /// This bounds blocking thread use even when many HTTP requests arrive at
+    /// once. Enable the `tokio` feature to use this API.
+    #[cfg(feature = "tokio")]
+    pub async fn resolve_proxy_async(&self, url: &Url) -> Result<Vec<ProxyKind>> {
+        if url.host_str().is_none() {
+            return Err(Error::InvalidUrl(url.to_string()));
+        }
+        let worker = self
+            .inner
+            .async_worker
+            .get_or_init(|| AsyncResolverWorker::new(Arc::downgrade(&self.inner)));
+        match worker {
+            Ok(worker) => worker.resolve(self.config_generation(), url).await,
+            Err(error) => Err(Error::Platform(error.clone())),
+        }
     }
 
     /// Current configuration generation. Bumped by the platform watcher on
@@ -652,6 +858,41 @@ mod tests {
             r.resolve_proxy(&url("data:text/plain,hi")),
             Err(Error::InvalidUrl(_))
         ));
+    }
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_resolution_coalesces_identical_concurrent_calls() {
+        use std::sync::atomic::Ordering;
+
+        let resolver = ProxyResolver::with_env(
+            ResolverOptions::default(),
+            env(&[("https_proxy", "http://proxy.example:3128")]),
+        );
+        *lock(&resolver.inner.async_resolution_delay) = Some(Duration::from_millis(100));
+
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let resolver = resolver.clone();
+            let target = url("https://example.com/");
+            tasks.push(tokio::spawn(async move {
+                resolver.resolve_proxy_async(&target).await.unwrap()
+            }));
+        }
+
+        for task in tasks {
+            assert_eq!(
+                task.await.unwrap(),
+                vec![ProxyKind::Http("proxy.example:3128".into())]
+            );
+        }
+        assert_eq!(
+            resolver
+                .inner
+                .async_resolution_starts
+                .load(Ordering::SeqCst),
+            1
+        );
     }
 
     #[cfg(not(windows))]

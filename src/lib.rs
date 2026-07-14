@@ -147,3 +147,13 @@ pub fn pac_wasm_artifact_size() -> usize {
 pub fn resolve_proxy(url: &url::Url) -> Result<Vec<ProxyKind>> {
     ProxyResolver::global().resolve_proxy(url)
 }
+
+/// Resolve the ordered proxy list asynchronously using the process-wide
+/// [`ProxyResolver`]. Blocking resolution is scheduled onto a dedicated background thread
+/// (PAC evaluation uses the existing PAC worker thread), and identical concurrent calls share one result.
+///
+/// See [`ProxyResolver::resolve_proxy_async`] for details.
+#[cfg(feature = "tokio")]
+pub async fn resolve_proxy_async(url: &url::Url) -> Result<Vec<ProxyKind>> {
+    ProxyResolver::global().resolve_proxy_async(url).await
+}
