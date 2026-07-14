@@ -1,0 +1,25 @@
+parameters:
+  - name: target
+    type: string
+  - name: test
+    type: boolean
+    default: false
+
+steps:
+  - pwsh: |
+      $ErrorActionPreference = "Stop"
+      $wabt = "$(Agent.TempDirectory)/wabt"
+      New-Item -ItemType Directory -Force $wabt | Out-Null
+      curl.exe -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz" -o "$wabt/wabt.tar.gz"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      tar.exe -xzf "$wabt/wabt.tar.gz" --strip-components=1 -C $wabt
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      $env:OS_PROXY_RESOLVER_WASM2C = "$wabt/bin/wasm2c.exe"
+      & $env:OS_PROXY_RESOLVER_WASM2C --version
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      node npm/scripts/build-native.js ${{ parameters.target }}
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      ${{ if parameters.test }}:
+        npm run test:npm
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    displayName: ${{ parameters.test && 'Build and test Windows addon' || 'Build Windows addon' }}

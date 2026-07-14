@@ -6,3 +6,8 @@
 # CI drops pregenerated wasm2c output here for cross builds (see build.rs
 # OS_PROXY_RESOLVER_PAC_GUEST_C_DIR and .github/workflows/ci.yml).
 /pac-wasm-guest/generated
+# Direct Cargo commands against the Node binding use its local target dir.
+/npm/native/target
+/npm/platforms/*/*.node
+/npm/platforms/*/LICENSE.txt
+/npm/platforms/*/ThirdPartyNotices.txt

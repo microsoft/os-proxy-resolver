@@ -1,0 +1,39 @@
+{
+  "name": "@vscode/os-proxy-resolver",
+  "version": "0.1.0",
+  "description": "Resolve the operating system proxy configuration from Node.js",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "LICENSE.txt",
+    "ThirdPartyNotices.txt"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/microsoft/os-proxy-resolver.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "scripts": {
+    "build:native": "node npm/scripts/build-native.js",
+    "test:npm": "node npm/test/smoke.js",
+    "verify:glibc": "node npm/scripts/verify-glibc.js",
+    "verify:packages": "node npm/scripts/verify-packages.js"
+  },
+  "optionalDependencies": {
+    "@vscode/os-proxy-resolver-darwin-arm64": "0.1.0",
+    "@vscode/os-proxy-resolver-darwin-x64": "0.1.0",
+    "@vscode/os-proxy-resolver-linux-arm-gnueabihf": "0.1.0",
+    "@vscode/os-proxy-resolver-linux-arm64-gnu": "0.1.0",
+    "@vscode/os-proxy-resolver-linux-x64-gnu": "0.1.0",
+    "@vscode/os-proxy-resolver-win32-arm64-msvc": "0.1.0",
+    "@vscode/os-proxy-resolver-win32-x64-msvc": "0.1.0"
+  }
+}
