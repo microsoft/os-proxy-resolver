@@ -59,7 +59,8 @@ const DEFAULT_PAC: &str = r#"
 function FindProxyForURL(url, host) {
     if (isPlainHostName(host) ||
         shExpMatch(host, "*.local") ||
-        isInNet(host, "127.0.0.0", "255.0.0.0")) {
+        (host === "127.0.0.1" &&
+         isInNet(host, "127.0.0.0", "255.0.0.0"))) {
         return "DIRECT";
     }
     if (dnsDomainIs(host, ".corp.example.com") ||
@@ -320,7 +321,10 @@ fn main() {
         s.print();
         stats.push(s);
     }
-    compare(&stats);
+    let timed_errors: usize = stats.iter().map(|stats| stats.errors).sum();
+    if timed_errors == 0 {
+        compare(&stats);
+    }
 
     if exact_diffs > 0 {
         eprintln!();
@@ -328,6 +332,11 @@ fn main() {
             "error: the embedded backends diverged on {exact_diffs} URL(s) — \
              they run identical engine sources, so this is a bug."
         );
+        std::process::exit(1);
+    }
+    if timed_errors > 0 {
+        eprintln!();
+        eprintln!("error: PAC benchmark had {timed_errors} timed call error(s)");
         std::process::exit(1);
     }
 }
@@ -435,6 +444,7 @@ struct Stats {
     label: &'static str,
     samples: Vec<u128>,
     errors: usize,
+    first_error: Option<String>,
 }
 
 impl Stats {
@@ -459,9 +469,15 @@ impl Stats {
         println!("{}", self.label);
         if n == 0 {
             println!("  no successful samples ({} errors)", self.errors);
+            if let Some(error) = &self.first_error {
+                println!("  first error: {error}");
+            }
             return;
         }
         println!("  calls   : {n} ({} errors)", self.errors);
+        if let Some(error) = &self.first_error {
+            println!("  first error: {error}");
+        }
         println!("  mean    : {}", fmt_ns(self.mean() as u128));
         println!("  p50     : {}", fmt_ns(self.percentile(0.50)));
         println!("  p90     : {}", fmt_ns(self.percentile(0.90)));
@@ -489,15 +505,18 @@ fn bench(label: &'static str, iterations: usize, urls: &[Url], call: &EvalFn) ->
 
     let mut samples = Vec::with_capacity(iterations);
     let mut errors = 0;
+    let mut first_error = None;
     for i in 0..iterations {
         let u = &urls[i % urls.len()];
         let start = Instant::now();
         let result = call(u);
         let elapsed = start.elapsed();
-        if result.is_ok() {
-            samples.push(elapsed.as_nanos());
-        } else {
-            errors += 1;
+        match result {
+            Ok(_) => samples.push(elapsed.as_nanos()),
+            Err(error) => {
+                errors += 1;
+                first_error.get_or_insert(error);
+            }
         }
     }
     samples.sort_unstable();
@@ -505,6 +524,7 @@ fn bench(label: &'static str, iterations: usize, urls: &[Url], call: &EvalFn) ->
         label,
         samples,
         errors,
+        first_error,
     }
 }
 
