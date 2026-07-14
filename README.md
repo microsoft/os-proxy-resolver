@@ -68,9 +68,18 @@ engine, selected explicitly via Cargo features:
   backend (explicit bounds checks on every memory access) and needs the pinned
   `wasm2c` binary on the build host (see
   [`pac-wasm-guest/README.md`](pac-wasm-guest/README.md)).
+- **`pac-engine-wasmtime-jit`** — JIT variant of the Wasmtime backend: the
+  same guest and host code, but with Cranelift compiled into the runtime and
+  the wasm JIT-compiled at startup instead of AOT-precompiled at build time
+  (`PacBackendKind::WasmtimeJit`). The operationally simplest wasm backend —
+  no build-time compile step, no target-specific artifact, no version-locked
+  `unsafe` deserialize. Trade-offs: the largest binary (Cranelift ships in
+  it), a one-time startup compile, and it gives up the AOT build's "no
+  compiler at runtime" hardening. It also serves as the stock-Wasmtime
+  reference point in the `pac_bench` comparisons.
 
-Enable at least one; the three are independent, and enabling several lets them
-be compared (the `pac_bench` benchmark does exactly that). Which one evaluates
+Enable at least one; the features are independent, and enabling several lets
+them be compared (the `pac_bench` benchmark does exactly that). Which one evaluates
 a script is chosen per resolver with `ResolverOptions::pac_backend`, defaulting
 to Wasmtime when it is compiled in (then native, then wasm2c). Off Windows a backend is **required** —
 building with neither is a compile error. On Windows WinHTTP handles PAC, so a
@@ -208,11 +217,12 @@ configurations (WinHTTP-only pure-Rust Windows, native-only, Wasmtime-only,
 wasm2c-only), and another job asserts that building with no backend off
 Windows is a compile error. Benchmark jobs run on **Windows, macOS, Linux, and
 Linux armv7 (qemu)**: `pac_bench` times every engine available on that OS
-(WinHTTP + native + Wasmtime + wasm2c on Windows; native + both sandboxes on
-macOS/Linux; native + wasm2c on armv7), cross-checks them, and reports the
-per-backend binary-size deltas, and [`bench/electron`](bench/electron) times
-Chromium's own V8 PAC resolver (what Electron uses by default) as the baseline
-next to the in-process numbers.
+(WinHTTP + native + Wasmtime AOT + wasm2c + Wasmtime JIT on the desktop OSes;
+native + wasm2c on armv7), cross-checks them, and reports **single-backend
+binary sizes** (one release build per backend with only that backend compiled
+in — the realistic deployment shape), and [`bench/electron`](bench/electron)
+times Chromium's own V8 PAC resolver (what Electron uses by default) as the
+baseline next to the in-process numbers.
 
 ## License
 

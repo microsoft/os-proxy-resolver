@@ -18,12 +18,22 @@
 //!
 //! # AOT only — no compiler at runtime
 //!
-//! This build of Wasmtime contains no Cranelift/JIT (see Cargo.toml). The
-//! guest module is precompiled by build.rs into `OUT_DIR/pac_guest.cwasm` and
-//! embedded into the binary; at runtime it is only [`Module::deserialize`]d.
-//! That call is `unsafe` because a *malicious* artifact could misbehave — here
-//! it is trusted first-party output of our own build.rs, compiled from the
-//! vendored `pac-wasm-guest/pac_guest.wasm`.
+//! With only `pac-engine-wasmtime`, this build of Wasmtime contains no
+//! Cranelift/JIT (see Cargo.toml). The guest module is precompiled by
+//! build.rs into `OUT_DIR/pac_guest.cwasm` and embedded into the binary; at
+//! runtime it is only [`Module::deserialize`]d. That call is `unsafe` because
+//! a *malicious* artifact could misbehave — here it is trusted first-party
+//! output of our own build.rs, compiled from the vendored
+//! `pac-wasm-guest/pac_guest.wasm`.
+//!
+//! The `pac-engine-wasmtime-jit` feature adds a second backend kind
+//! ([`WasmtimeJitPacEngine`], `PacBackendKind::WasmtimeJit`) that shares
+//! every line of host code here but embeds the raw wasm and JIT-compiles it
+//! at startup with `Module::new` — which requires Cranelift in the *runtime*
+//! dependency. It is the simplest wasm backend to build (no compile step, no
+//! target-specific artifact, no `unsafe` deserialize) in exchange for the
+//! largest binary, a one-time startup compile, and giving up this module's
+//! "no compiler at runtime" hardening.
 //!
 //! # Timeouts and memory
 //!
@@ -63,11 +73,18 @@ use super::engine::state::{HostState, LogSink};
 use super::engine::{Error, DEFAULT_TIMEOUT};
 
 /// The AOT-compiled guest module produced by build.rs for the current target.
+#[cfg(feature = "pac-engine-wasmtime")]
 static PAC_GUEST_CWASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pac_guest.cwasm"));
 
 /// Size of the embedded AOT artifact — the dominant binary-size contribution
 /// of this backend, reported by the `pac_bench` example.
+#[cfg(feature = "pac-engine-wasmtime")]
 pub(crate) const CWASM_SIZE: usize = PAC_GUEST_CWASM.len();
+
+/// The raw guest wasm, embedded for the JIT variant (staged into OUT_DIR by
+/// build.rs so the vendored-guest override applies).
+#[cfg(feature = "pac-engine-wasmtime-jit")]
+static PAC_GUEST_WASM_JIT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pac_guest_jit.wasm"));
 
 /// Granularity of epoch interruption. Finer ticks mean tighter timeout
 /// enforcement but more watchdog wakeups while PAC calls are running.
@@ -110,8 +127,10 @@ type SharedLogSink = std::rc::Rc<dyn Fn(&str)>;
 
 /// A PAC evaluator running QuickJS-NG inside a Wasmtime sandbox; the wasm
 /// counterpart of [`super::engine::PacEngine`], driven through the same
-/// [`super::PacBackend`] trait.
-pub(crate) struct WasmtimePacEngine {
+/// [`super::PacBackend`] trait. `JIT` selects where the module code comes
+/// from — the build-time AOT artifact (`false`) or `Module::new` on the
+/// embedded raw wasm at startup (`true`); everything else is shared.
+pub(crate) struct WasmtimeEngine<const JIT: bool> {
     guest: GuestInstance,
     /// The loaded script, kept so the engine can rebuild itself after a trap
     /// (an interrupted guest cannot be trusted to still be consistent).
@@ -125,12 +144,20 @@ pub(crate) struct WasmtimePacEngine {
     poisoned: bool,
 }
 
-impl super::PacBackend for WasmtimePacEngine {
-    const NAME: &'static str = "wasmtime";
+/// The AOT backend (`pac-engine-wasmtime`): no compiler at runtime.
+#[cfg(feature = "pac-engine-wasmtime")]
+pub(crate) type WasmtimePacEngine = WasmtimeEngine<false>;
+
+/// The JIT backend (`pac-engine-wasmtime-jit`): compiles at startup.
+#[cfg(feature = "pac-engine-wasmtime-jit")]
+pub(crate) type WasmtimeJitPacEngine = WasmtimeEngine<true>;
+
+impl<const JIT: bool> super::PacBackend for WasmtimeEngine<JIT> {
+    const NAME: &'static str = if JIT { "wasmtime-jit" } else { "wasmtime" };
 
     fn new() -> Result<Self, Error> {
-        let guest = GuestInstance::new(DEFAULT_WASM_MEMORY_LIMIT)?;
-        Ok(WasmtimePacEngine {
+        let guest = GuestInstance::new(module_for(JIT)?, DEFAULT_WASM_MEMORY_LIMIT)?;
+        Ok(WasmtimeEngine {
             guest,
             script: None,
             timeout: DEFAULT_TIMEOUT,
@@ -193,11 +220,11 @@ impl super::PacBackend for WasmtimePacEngine {
     }
 }
 
-impl WasmtimePacEngine {
+impl<const JIT: bool> WasmtimeEngine<JIT> {
     /// Recreates the store/instance after a trap and replays the settings and
     /// the loaded script.
     fn rebuild(&mut self) -> Result<(), Error> {
-        self.guest = GuestInstance::new(self.memory_limit)?;
+        self.guest = GuestInstance::new(module_for(JIT)?, self.memory_limit)?;
         self.guest.store.data().host.timeout.set(self.timeout);
         self.guest.store.data().host.my_ip.set(self.my_ip);
         if let Some(sink) = &self.log_sink {
@@ -219,9 +246,8 @@ impl WasmtimePacEngine {
 }
 
 impl GuestInstance {
-    fn new(memory_limit: usize) -> Result<Self, Error> {
+    fn new(module: &'static Module, memory_limit: usize) -> Result<Self, Error> {
         let engine = global_engine()?;
-        let module = global_module()?;
 
         let mut linker: Linker<StoreData> = Linker::new(engine);
         define_pac_host_imports(&mut linker).map_err(internal("define host imports"))?;
@@ -410,7 +436,25 @@ fn global_engine() -> Result<&'static Engine, Error> {
         .map_err(|e| Error::Internal(format!("failed to create Wasmtime engine: {e}")))
 }
 
-fn global_module() -> Result<&'static Module, Error> {
+/// Resolves the guest module for the requested backend kind. The `bool` is a
+/// runtime value (fed from the `JIT` const generic), so the cfg'd-out arm of
+/// a single-variant build never has to typecheck against a missing global.
+fn module_for(jit: bool) -> Result<&'static Module, Error> {
+    if jit {
+        #[cfg(feature = "pac-engine-wasmtime-jit")]
+        return global_module_jit();
+        #[cfg(not(feature = "pac-engine-wasmtime-jit"))]
+        unreachable!("WasmtimeJit backend without the pac-engine-wasmtime-jit feature");
+    } else {
+        #[cfg(feature = "pac-engine-wasmtime")]
+        return global_module_aot();
+        #[cfg(not(feature = "pac-engine-wasmtime"))]
+        unreachable!("Wasmtime backend without the pac-engine-wasmtime feature");
+    }
+}
+
+#[cfg(feature = "pac-engine-wasmtime")]
+fn global_module_aot() -> Result<&'static Module, Error> {
     static MODULE: OnceLock<Result<Module, String>> = OnceLock::new();
     MODULE
         .get_or_init(|| {
@@ -423,6 +467,21 @@ fn global_module() -> Result<&'static Module, Error> {
         })
         .as_ref()
         .map_err(|e| Error::Internal(format!("failed to load PAC guest module: {e}")))
+}
+
+/// JIT-compiles the embedded raw wasm once per process — the startup cost
+/// the AOT artifact exists to avoid (about a second in release builds, tens
+/// of seconds with a debug-profile Cranelift).
+#[cfg(feature = "pac-engine-wasmtime-jit")]
+fn global_module_jit() -> Result<&'static Module, Error> {
+    static MODULE: OnceLock<Result<Module, String>> = OnceLock::new();
+    MODULE
+        .get_or_init(|| {
+            let engine = global_engine().map_err(|e| e.to_string())?;
+            Module::new(engine, PAC_GUEST_WASM_JIT).map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| Error::Internal(format!("failed to JIT-compile PAC guest module: {e}")))
 }
 
 /// Watchdog driving epoch interruption: bumps the engine epoch every

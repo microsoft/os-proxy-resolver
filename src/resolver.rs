@@ -90,6 +90,7 @@ struct Inner {
         not(windows),
         feature = "pac-engine",
         feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
         feature = "pac-engine-wasm2c"
     ))]
     pac: OnceLock<crate::pac::PacEvaluator>,
@@ -101,6 +102,7 @@ struct Inner {
         not(windows),
         feature = "pac-engine",
         feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
         feature = "pac-engine-wasm2c"
     ))]
     my_ip: Mutex<Option<(Instant, Option<String>)>>,
@@ -163,6 +165,7 @@ impl ProxyResolver {
                     not(windows),
                     feature = "pac-engine",
                     feature = "pac-engine-wasmtime",
+                    feature = "pac-engine-wasmtime-jit",
                     feature = "pac-engine-wasm2c"
                 ))]
                 pac: OnceLock::new(),
@@ -174,6 +177,7 @@ impl ProxyResolver {
                     not(windows),
                     feature = "pac-engine",
                     feature = "pac-engine-wasmtime",
+                    feature = "pac-engine-wasmtime-jit",
                     feature = "pac-engine-wasm2c"
                 ))]
                 my_ip: Mutex::new(None),
@@ -257,6 +261,7 @@ impl ProxyResolver {
         not(windows),
         feature = "pac-engine",
         feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
         feature = "pac-engine-wasm2c"
     ))]
     pub fn evaluate_pac(&self, script: &str, url: &Url) -> Result<Vec<ProxyKind>> {
@@ -400,6 +405,7 @@ impl ProxyResolver {
         not(windows),
         feature = "pac-engine",
         feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
         feature = "pac-engine-wasm2c"
     ))]
     fn pac_evaluator(&self) -> &crate::pac::PacEvaluator {
@@ -497,6 +503,7 @@ impl ProxyResolver {
         not(windows),
         feature = "pac-engine",
         feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
         feature = "pac-engine-wasm2c"
     ))]
     fn my_ip(&self) -> Option<String> {
@@ -576,6 +583,17 @@ mod tests {
         Url::parse(s).unwrap()
     }
 
+    /// Default options with a generous PAC timeout: it is only an upper bound
+    /// (calls return as soon as the worker replies), and the first call on
+    /// the JIT backend compiles the guest with a debug-profile Cranelift,
+    /// which takes tens of seconds on CI runners.
+    fn pac_test_options() -> ResolverOptions {
+        ResolverOptions {
+            pac_timeout: Duration::from_secs(120),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn env_takes_precedence_and_demotion_works() {
         let r = ProxyResolver::with_env(
@@ -639,7 +657,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn evaluate_pac_public_api() {
-        let r = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+        let r = ProxyResolver::with_env(pac_test_options(), env(&[]));
         let got = r
             .evaluate_pac(
                 "function FindProxyForURL(url, host) { return 'PROXY p:1; DIRECT'; }",
@@ -679,7 +697,7 @@ mod tests {
             }
         });
 
-        let r = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+        let r = ProxyResolver::with_env(pac_test_options(), env(&[]));
         let pac_url = format!("http://{addr}/proxy.pac");
         let got = r
             .evaluate_pac_source(&pac_url, &url("https://x.com/"))

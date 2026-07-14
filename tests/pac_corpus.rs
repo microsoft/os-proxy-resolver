@@ -13,6 +13,7 @@
     not(windows),
     feature = "pac-engine",
     feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
     feature = "pac-engine-wasm2c"
 ))]
 
@@ -24,8 +25,8 @@ fn resolver_for(kind: PacBackendKind) -> ProxyResolver {
     options.pac_backend = kind;
     // Upper bound only (calls return as soon as the worker replies); the
     // default 5s is too tight for the wasm2c backend under qemu in debug CI
-    // builds.
-    options.pac_timeout = std::time::Duration::from_secs(60);
+    // builds and for the JIT backend's first-call Cranelift compile.
+    options.pac_timeout = std::time::Duration::from_secs(120);
     ProxyResolver::with_options(options)
 }
 
@@ -56,6 +57,14 @@ fn resolvers() -> Vec<(PacBackendKind, &'static ProxyResolver)> {
         resolvers.push((
             PacBackendKind::Wasm2c,
             WASM2C.get_or_init(|| resolver_for(PacBackendKind::Wasm2c)),
+        ));
+    }
+    #[cfg(feature = "pac-engine-wasmtime-jit")]
+    {
+        static WASMTIME_JIT: OnceLock<ProxyResolver> = OnceLock::new();
+        resolvers.push((
+            PacBackendKind::WasmtimeJit,
+            WASMTIME_JIT.get_or_init(|| resolver_for(PacBackendKind::WasmtimeJit)),
         ));
     }
     resolvers

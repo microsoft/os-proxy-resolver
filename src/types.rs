@@ -58,33 +58,33 @@ pub enum PacBackendKind {
     /// Requires the `pac-engine-wasm2c` feature; selecting it without that
     /// feature makes PAC evaluation fail with [`Error::PacEval`].
     Wasm2c,
+    /// JIT variant of [`Wasmtime`](Self::Wasmtime): the same guest and host
+    /// code, but with Cranelift in the runtime and the wasm JIT-compiled at
+    /// startup instead of AOT-precompiled at build time. Simplest to build
+    /// (no compile step, no target-specific artifact) at the cost of the
+    /// largest binary, a one-time startup compile, and the AOT build's "no
+    /// compiler at runtime" hardening. Requires the
+    /// `pac-engine-wasmtime-jit` feature; selecting it without that feature
+    /// makes PAC evaluation fail with [`Error::PacEval`].
+    WasmtimeJit,
 }
 
 impl Default for PacBackendKind {
-    /// [`Wasmtime`](Self::Wasmtime) when the `pac-engine-wasmtime` feature is
-    /// enabled (the default feature set); otherwise [`Native`](Self::Native);
-    /// otherwise [`Wasm2c`](Self::Wasm2c) — so the default backend is always
-    /// one that is actually compiled in. `Wasm2c` is deliberately last: it is
-    /// the portability fallback, never preferred over the other two.
+    /// The first compiled-in backend in preference order — Wasmtime (the
+    /// default feature set), then Native, then Wasm2c, then WasmtimeJit — so
+    /// the default is always one that actually works. (Backend-less builds
+    /// are Windows-only, where PAC never reaches an embedded backend.)
     fn default() -> Self {
-        #[cfg(feature = "pac-engine-wasmtime")]
-        {
+        if cfg!(feature = "pac-engine-wasmtime") {
             PacBackendKind::Wasmtime
-        }
-        #[cfg(all(
-            not(feature = "pac-engine-wasmtime"),
-            any(feature = "pac-engine", not(feature = "pac-engine-wasm2c"))
-        ))]
-        {
+        } else if cfg!(feature = "pac-engine") {
             PacBackendKind::Native
-        }
-        #[cfg(all(
-            not(feature = "pac-engine-wasmtime"),
-            not(feature = "pac-engine"),
-            feature = "pac-engine-wasm2c"
-        ))]
-        {
+        } else if cfg!(feature = "pac-engine-wasm2c") {
             PacBackendKind::Wasm2c
+        } else if cfg!(feature = "pac-engine-wasmtime-jit") {
+            PacBackendKind::WasmtimeJit
+        } else {
+            PacBackendKind::Native
         }
     }
 }

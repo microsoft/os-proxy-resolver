@@ -39,15 +39,23 @@
 pub(crate) mod engine;
 #[cfg(feature = "pac-engine-wasm2c")]
 pub(crate) mod engine_wasm2c;
-#[cfg(feature = "pac-engine-wasmtime")]
+#[cfg(any(feature = "pac-engine-wasmtime", feature = "pac-engine-wasmtime-jit"))]
 pub(crate) mod engine_wasmtime;
 // The guest ABI and the runtime-agnostic host helpers shared by the wasm
 // backends (the guest crate pulls wasm_abi in with `include!`; not every
 // backend build uses every constant).
-#[cfg(any(feature = "pac-engine-wasmtime", feature = "pac-engine-wasm2c"))]
+#[cfg(any(
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+))]
 #[allow(dead_code)]
 pub(crate) mod wasm_abi;
-#[cfg(any(feature = "pac-engine-wasmtime", feature = "pac-engine-wasm2c"))]
+#[cfg(any(
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+))]
 pub(crate) mod wasm_host;
 
 use crate::types::{parse_pac_result, sanitize_url_for_pac, Error, ProxyKind, Result};
@@ -197,6 +205,17 @@ fn worker(kind: PacBackendKind) -> Result<&'static Worker> {
         PacBackendKind::Wasm2c => Err(Error::PacEval(
             "the wasm2c PAC backend is not compiled in (enable the \
              `pac-engine-wasm2c` feature)"
+                .into(),
+        )),
+        #[cfg(feature = "pac-engine-wasmtime-jit")]
+        PacBackendKind::WasmtimeJit => {
+            static WORKER: std::sync::OnceLock<Worker> = std::sync::OnceLock::new();
+            Ok(WORKER.get_or_init(spawn_worker::<engine_wasmtime::WasmtimeJitPacEngine>))
+        }
+        #[cfg(not(feature = "pac-engine-wasmtime-jit"))]
+        PacBackendKind::WasmtimeJit => Err(Error::PacEval(
+            "the Wasmtime JIT PAC backend is not compiled in (enable the \
+             `pac-engine-wasmtime-jit` feature)"
                 .into(),
         )),
     }
@@ -370,9 +389,11 @@ mod tests {
 
     fn eval_with(kind: PacBackendKind, pac: &str, url: &str) -> Result<Vec<ProxyKind>> {
         // Generous caller-side timeout: it is only an upper bound (the call
-        // returns as soon as the worker replies), and the wasm2c backend
-        // under qemu in debug CI builds needs several seconds per call.
-        let evaluator = PacEvaluator::new(Duration::from_secs(60), kind);
+        // returns as soon as the worker replies). Slow-but-correct cases it
+        // must absorb: the wasm2c backend under qemu in debug CI builds, and
+        // the JIT backend's first call, which compiles the guest with a
+        // debug-profile Cranelift.
+        let evaluator = PacEvaluator::new(Duration::from_secs(120), kind);
         let script: Arc<str> = Arc::from(pac);
         evaluator.find_proxy(&script, &Url::parse(url).unwrap(), None)
     }
@@ -388,6 +409,9 @@ mod tests {
         }
         if cfg!(feature = "pac-engine-wasm2c") {
             kinds.push(PacBackendKind::Wasm2c);
+        }
+        if cfg!(feature = "pac-engine-wasmtime-jit") {
+            kinds.push(PacBackendKind::WasmtimeJit);
         }
         kinds
     }
@@ -527,6 +551,23 @@ mod tests {
         .unwrap_err();
         match err {
             Error::PacEval(msg) => assert!(msg.contains("pac-engine"), "{msg}"),
+            other => panic!("expected PacEval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasmtime_jit_without_feature_reports_unavailable() {
+        if cfg!(feature = "pac-engine-wasmtime-jit") {
+            return;
+        }
+        let err = eval_with(
+            PacBackendKind::WasmtimeJit,
+            "function FindProxyForURL(url, host) { return 'DIRECT'; }",
+            "http://example.com/",
+        )
+        .unwrap_err();
+        match err {
+            Error::PacEval(msg) => assert!(msg.contains("pac-engine-wasmtime-jit"), "{msg}"),
             other => panic!("expected PacEval, got {other:?}"),
         }
     }

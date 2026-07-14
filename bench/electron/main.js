@@ -30,7 +30,8 @@ const DEFAULT_PAC = `
 function FindProxyForURL(url, host) {
     if (isPlainHostName(host) ||
         shExpMatch(host, "*.local") ||
-        isInNet(host, "127.0.0.0", "255.0.0.0")) {
+    (host === "127.0.0.1" &&
+     isInNet(host, "127.0.0.0", "255.0.0.0"))) {
         return "DIRECT";
     }
     if (dnsDomainIs(host, ".corp.example.com") ||
