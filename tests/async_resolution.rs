@@ -27,20 +27,21 @@ fn async_resolution_worker_processes_second_distinct_request() {
             "--nocapture",
         ])
         .env(CHILD_ENV, "1")
-        .env("https_proxy", "http://proxy.example:3128")
-        .env_remove("HTTPS_PROXY")
-        .env_remove("http_proxy")
-        .env_remove("HTTP_PROXY")
-        .env_remove("all_proxy")
-        .env_remove("ALL_PROXY")
-        .env_remove("no_proxy")
-        .env_remove("NO_PROXY")
         .spawn()
         .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(status) = child.try_wait().unwrap() {
+            // Cross-target CI launches this test through a Cargo runner (QEMU,
+            // Wine, ...), but a nested `Command` cannot recover that runner and
+            // may fail immediately when executing the foreign binary directly.
+            // Native jobs still exercise the regression; a deadlocked child is
+            // distinguished by remaining alive until the deadline below.
+            if status.code() == Some(2) {
+                eprintln!("skipping nested subprocess unsupported by this target runner");
+                return;
+            }
             assert!(status.success(), "async resolver child failed: {status}");
             return;
         }
@@ -58,6 +59,24 @@ fn async_resolution_distinct_request_child() {
     if std::env::var_os(CHILD_ENV).is_none() {
         return;
     }
+
+    // ProxyResolver snapshots its environment at construction. Clear every
+    // supported spelling before setting the canonical uppercase value last:
+    // Windows environment names are case-insensitive, so removing an uppercase
+    // alias after setting lowercase would remove the test value too.
+    for name in [
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+    ] {
+        std::env::remove_var(name);
+    }
+    std::env::set_var("HTTPS_PROXY", "http://proxy.example:3128");
 
     tokio::runtime::Builder::new_current_thread()
         .build()
