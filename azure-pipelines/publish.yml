@@ -109,7 +109,7 @@ extends:
         ghCreateRelease: false
         testPlatforms: {}
         buildSteps:
-          - template: azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+          - template: /azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
             parameters:
               arch: x64
               nodeVersion: 22.x
@@ -130,14 +130,15 @@ extends:
         ghCreateRelease: false
         testPlatforms: {}
         buildSteps:
-          - template: azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+          - template: /azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
             parameters:
               arch: arm64
               nodeVersion: 22.x
+          # The network-isolated x64 package agent has no ARM Node runtime.
+          # GitHub CI runs the Rust wasm2c backend under QEMU for this target.
           - template: azure-pipelines/steps/build-linux-addon.yml@self
             parameters:
               target: aarch64-unknown-linux-gnu
-              test: true
 
       - name: os-proxy-resolver-linux-arm-gnueabihf
         dependsOn: os-proxy-resolver-linux-arm64-gnu
@@ -151,14 +152,15 @@ extends:
         ghCreateRelease: false
         testPlatforms: {}
         buildSteps:
-          - template: azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+          - template: /azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
             parameters:
               arch: arm
               nodeVersion: 22.x
+          # The network-isolated x64 package agent has no ARMv7 Node runtime.
+          # GitHub CI runs the Rust wasm2c backend under QEMU for this target.
           - template: azure-pipelines/steps/build-linux-addon.yml@self
             parameters:
               target: armv7-unknown-linux-gnueabihf
-              test: true
 
       - name: os-proxy-resolver
         dependsOn: os-proxy-resolver-linux-arm-gnueabihf

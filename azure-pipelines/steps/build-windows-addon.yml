@@ -6,6 +6,8 @@ parameters:
     default: false
 
 steps:
+  - template: authenticate-cargo.yml
+
   - pwsh: |
       $ErrorActionPreference = "Stop"
       $wabt = "$(Agent.TempDirectory)/wabt"
@@ -19,7 +21,10 @@ steps:
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       node npm/scripts/build-native.js ${{ parameters.target }}
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      ${{ if parameters.test }}:
-        npm run test:npm
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    displayName: ${{ parameters.test && 'Build and test Windows addon' || 'Build Windows addon' }}
+    displayName: Build Windows addon
+
+  - ${{ if eq(parameters.test, true) }}:
+      - pwsh: |
+          npm run test:npm
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        displayName: Test Windows addon

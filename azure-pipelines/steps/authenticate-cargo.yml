@@ -1,0 +1,12 @@
+steps:
+  - pwsh: |
+      $cargoHome = Join-Path "$(Agent.TempDirectory)" "cargo"
+      New-Item -ItemType Directory -Force $cargoHome | Out-Null
+      Copy-Item "$(Build.SourcesDirectory)/azure-pipelines/cargo/config.toml" (Join-Path $cargoHome "config.toml") -Force
+      Write-Host "##vso[task.setvariable variable=CARGO_HOME]$cargoHome"
+    displayName: Configure Cargo home
+
+  - task: CargoAuthenticate@0
+    inputs:
+      configFile: $(CARGO_HOME)/config.toml
+    displayName: Authenticate Cargo registry
