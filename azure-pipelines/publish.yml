@@ -45,7 +45,6 @@ extends:
               test: true
 
       - name: os-proxy-resolver-win32-arm64-msvc
-        dependsOn: os-proxy-resolver-win32-x64-msvc
         packagePlatform: Windows
         rustTargets: aarch64-pc-windows-msvc
         workingDirectory: npm/platforms/win32-arm64-msvc
@@ -63,7 +62,6 @@ extends:
               target: aarch64-pc-windows-msvc
 
       - name: os-proxy-resolver-darwin-x64
-        dependsOn: os-proxy-resolver-win32-arm64-msvc
         packagePlatform: MacOS
         rustTargets: x86_64-apple-darwin
         workingDirectory: npm/platforms/darwin-x64
@@ -80,7 +78,6 @@ extends:
               test: true
 
       - name: os-proxy-resolver-darwin-arm64
-        dependsOn: os-proxy-resolver-darwin-x64
         packagePlatform: MacOS
         rustTargets: aarch64-apple-darwin
         workingDirectory: npm/platforms/darwin-arm64
@@ -98,7 +95,6 @@ extends:
               target: aarch64-apple-darwin
 
       - name: os-proxy-resolver-linux-x64-gnu
-        dependsOn: os-proxy-resolver-darwin-arm64
         packagePlatform: Linux
         rustTargets: x86_64-unknown-linux-gnu
         workingDirectory: npm/platforms/linux-x64-gnu
@@ -119,7 +115,6 @@ extends:
               test: true
 
       - name: os-proxy-resolver-linux-arm64-gnu
-        dependsOn: os-proxy-resolver-linux-x64-gnu
         packagePlatform: Linux
         rustTargets: aarch64-unknown-linux-gnu
         workingDirectory: npm/platforms/linux-arm64-gnu
@@ -141,7 +136,6 @@ extends:
               target: aarch64-unknown-linux-gnu
 
       - name: os-proxy-resolver-linux-arm-gnueabihf
-        dependsOn: os-proxy-resolver-linux-arm64-gnu
         packagePlatform: Linux
         rustTargets: armv7-unknown-linux-gnueabihf
         workingDirectory: npm/platforms/linux-arm-gnueabihf
@@ -163,7 +157,14 @@ extends:
               target: armv7-unknown-linux-gnueabihf
 
       - name: os-proxy-resolver
-        dependsOn: os-proxy-resolver-linux-arm-gnueabihf
+        dependsOnPackages:
+          - os-proxy-resolver-win32-x64-msvc
+          - os-proxy-resolver-win32-arm64-msvc
+          - os-proxy-resolver-darwin-x64
+          - os-proxy-resolver-darwin-arm64
+          - os-proxy-resolver-linux-x64-gnu
+          - os-proxy-resolver-linux-arm64-gnu
+          - os-proxy-resolver-linux-arm-gnueabihf
         workingDirectory: .
         publishPackage: ${{ parameters.publishPackage }}
         publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
