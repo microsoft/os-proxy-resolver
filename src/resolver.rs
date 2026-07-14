@@ -241,9 +241,13 @@ impl AsyncResolverWorker {
                             "proxy resolver was dropped during async resolution".to_string(),
                         )),
                     };
-                    if let Some(sender) = lock(&worker_inflight).get(&request.key).cloned() {
+                    // Remove while holding the lock, then notify after the guard
+                    // is dropped. An `if let lock(...).get(...).cloned()` keeps
+                    // the temporary guard alive through its body, so locking
+                    // again there deadlocks this sole resolver thread.
+                    let sender = lock(&worker_inflight).remove(&request.key);
+                    if let Some(sender) = sender {
                         let _ = sender.send(Some(result));
-                        lock(&worker_inflight).remove(&request.key);
                     }
                 }
             })
