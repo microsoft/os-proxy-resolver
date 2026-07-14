@@ -94,7 +94,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors from proxy resolution. PAC/WPAD failures are generally *not*
 /// surfaced here — resolution falls back to the next layer and ultimately to
 /// `DIRECT`. Errors mean the input was unusable or a platform call failed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Error {
     /// The URL has no host or is otherwise not resolvable against a proxy config.

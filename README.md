@@ -17,9 +17,14 @@ for proxy in resolve_proxy(&url)? {
 ```
 
 Results mirror PAC semantics: `"PROXY a:8080; DIRECT"` → an *ordered* fallback
-list `[Http("a:8080"), Direct]`. The API is synchronous; PAC evaluation runs
-on a dedicated worker thread. Calls may block on network I/O up to configured
-timeouts, so use `spawn_blocking` (or similar) from async runtimes.
+list `[Http("a:8080"), Direct]`. The base API is synchronous and may block on
+network I/O up to configured timeouts. With the `tokio` feature, use
+`resolve_proxy_async` instead: blocking resolution is scheduled onto a lazy background thread, identical concurrent calls share a result, and distinct targets
+queue without consuming async-runtime blocking threads.
+
+```rust
+let proxies = os_proxy_resolver::resolve_proxy_async(&url).await?;
+```
 
 ## Architecture
 
