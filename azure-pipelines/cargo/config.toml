@@ -1,0 +1,11 @@
+[registry]
+global-credential-providers = ["cargo:token"]
+
+[registries.vscode]
+index = "sparse+https://pkgs.dev.azure.com/monacotools/Monaco/_packaging/vscode/Cargo/index/"
+
+[source.crates-io]
+replace-with = "vscode"
+
+[source.vscode]
+registry = "sparse+https://pkgs.dev.azure.com/monacotools/Monaco/_packaging/vscode/Cargo/index/"

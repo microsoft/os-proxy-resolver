@@ -33,11 +33,26 @@ toolchain_root="/tmp/vscode-${sysroot_arch}-sysroot/${toolchain}"
 sysroot="${toolchain_root}/${toolchain}/sysroot"
 compiler="${toolchain_root}/bin/${toolchain}-gcc"
 objdump="${toolchain_root}/${toolchain}/bin/objdump"
+rust_sysroot=$(rustc --print sysroot)
+rust_host=$(rustc -vV | sed -n 's/^host: //p')
+rust_lld="${rust_sysroot}/lib/rustlib/${rust_host}/bin/gcc-ld/ld.lld"
+linker_directory="${TMPDIR:-/tmp}/os-proxy-resolver-linker-${target}"
 
 if [[ ! -x "$compiler" || ! -d "$sysroot" || ! -x "$objdump" ]]; then
 	echo "VS Code glibc 2.28 sysroot for ${sysroot_arch} is not installed" >&2
 	exit 1
 fi
+if [[ ! -x "$rust_lld" ]]; then
+	echo "Rust toolchain does not provide the modern linker ${rust_lld}" >&2
+	exit 1
+fi
+
+# The glibc 2.28 sysroot's GCC driver selects the correct CRT and libraries,
+# but its binutils linker cannot read zstd-compressed debug sections in current
+# Rust rlibs. GCC's -B option keeps it as the driver while making it invoke the
+# modern ld.lld shipped with Rust for the final link.
+mkdir -p "$linker_directory"
+ln -sf "$rust_lld" "${linker_directory}/ld"
 
 target_env=$(printf '%s' "$target" | tr '[:lower:]-' '[:upper:]_')
 cc_env="CC_$(printf '%s' "$target" | tr '-' '_')"
@@ -48,7 +63,7 @@ rustflags_env="CARGO_TARGET_${target_env}_RUSTFLAGS"
 export "$cc_env=$compiler"
 export "$cflags_env=--sysroot=$sysroot"
 export "$linker_env=$compiler"
-export "$rustflags_env=-C link-arg=--sysroot=$sysroot -C link-arg=-L${sysroot}/usr/lib/${library_arch} -C link-arg=-L${sysroot}/lib/${library_arch}"
+export "$rustflags_env=-C link-arg=-B${linker_directory} -C link-arg=--sysroot=$sysroot -C link-arg=-L${sysroot}/usr/lib/${library_arch} -C link-arg=-L${sysroot}/lib/${library_arch}"
 
 cd "$root"
 node npm/scripts/build-native.js "$target"
