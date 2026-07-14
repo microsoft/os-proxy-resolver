@@ -1,0 +1,16 @@
+parameters:
+  - name: target
+    type: string
+  - name: test
+    type: boolean
+    default: false
+
+steps:
+  - bash: |
+      set -e
+      brew install wabt
+      wasm2c --version
+      node npm/scripts/build-native.js ${{ parameters.target }}
+      ${{ if parameters.test }}:
+        npm run test:npm
+    displayName: ${{ parameters.test && 'Build and test macOS addon' || 'Build macOS addon' }}

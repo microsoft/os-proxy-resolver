@@ -1,0 +1,172 @@
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - main
+pr: none
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: microsoft/vscode-engineering
+      ref: main
+      endpoint: Monaco
+
+parameters:
+  - name: publishPackage
+    displayName: Publish @vscode/os-proxy-resolver packages to npm
+    type: boolean
+    default: false
+  - name: publishPackageToAzureArtifacts
+    displayName: Publish @vscode/os-proxy-resolver packages to Azure Artifacts
+    type: boolean
+    default: false
+
+extends:
+  template: azure-pipelines/npm-package/pipeline.yml@templates
+  parameters:
+    npmPackages:
+      - name: os-proxy-resolver-win32-x64-msvc
+        packagePlatform: Windows
+        rustTargets: x86_64-pc-windows-msvc
+        workingDirectory: npm/platforms/win32-x64-msvc
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          - template: azure-pipelines/steps/build-windows-addon.yml@self
+            parameters:
+              target: x86_64-pc-windows-msvc
+              test: true
+
+      - name: os-proxy-resolver-win32-arm64-msvc
+        dependsOn: os-proxy-resolver-win32-x64-msvc
+        packagePlatform: Windows
+        rustTargets: aarch64-pc-windows-msvc
+        workingDirectory: npm/platforms/win32-arm64-msvc
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          # The shared package template uses a Windows x64 agent. This addon is
+          # runtime-tested on the native windows-11-arm GitHub CI runner.
+          - template: azure-pipelines/steps/build-windows-addon.yml@self
+            parameters:
+              target: aarch64-pc-windows-msvc
+
+      - name: os-proxy-resolver-darwin-x64
+        dependsOn: os-proxy-resolver-win32-arm64-msvc
+        packagePlatform: MacOS
+        rustTargets: x86_64-apple-darwin
+        workingDirectory: npm/platforms/darwin-x64
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          - template: azure-pipelines/steps/build-macos-addon.yml@self
+            parameters:
+              target: x86_64-apple-darwin
+              test: true
+
+      - name: os-proxy-resolver-darwin-arm64
+        dependsOn: os-proxy-resolver-darwin-x64
+        packagePlatform: MacOS
+        rustTargets: aarch64-apple-darwin
+        workingDirectory: npm/platforms/darwin-arm64
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          # The shared package template uses a macOS x64 agent. This addon is
+          # runtime-tested on the native macOS arm64 GitHub CI runner.
+          - template: azure-pipelines/steps/build-macos-addon.yml@self
+            parameters:
+              target: aarch64-apple-darwin
+
+      - name: os-proxy-resolver-linux-x64-gnu
+        dependsOn: os-proxy-resolver-darwin-arm64
+        packagePlatform: Linux
+        rustTargets: x86_64-unknown-linux-gnu
+        workingDirectory: npm/platforms/linux-x64-gnu
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          - template: azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+            parameters:
+              arch: x64
+              nodeVersion: 22.x
+          - template: azure-pipelines/steps/build-linux-addon.yml@self
+            parameters:
+              target: x86_64-unknown-linux-gnu
+              test: true
+
+      - name: os-proxy-resolver-linux-arm64-gnu
+        dependsOn: os-proxy-resolver-linux-x64-gnu
+        packagePlatform: Linux
+        rustTargets: aarch64-unknown-linux-gnu
+        workingDirectory: npm/platforms/linux-arm64-gnu
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          - template: azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+            parameters:
+              arch: arm64
+              nodeVersion: 22.x
+          - template: azure-pipelines/steps/build-linux-addon.yml@self
+            parameters:
+              target: aarch64-unknown-linux-gnu
+              test: true
+
+      - name: os-proxy-resolver-linux-arm-gnueabihf
+        dependsOn: os-proxy-resolver-linux-arm64-gnu
+        packagePlatform: Linux
+        rustTargets: armv7-unknown-linux-gnueabihf
+        workingDirectory: npm/platforms/linux-arm-gnueabihf
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          - template: azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+            parameters:
+              arch: arm
+              nodeVersion: 22.x
+          - template: azure-pipelines/steps/build-linux-addon.yml@self
+            parameters:
+              target: armv7-unknown-linux-gnueabihf
+              test: true
+
+      - name: os-proxy-resolver
+        dependsOn: os-proxy-resolver-linux-arm-gnueabihf
+        workingDirectory: .
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        testPlatforms: {}
+        buildSteps:
+          - script: npm run verify:packages
+            displayName: Verify package versions

@@ -1,0 +1,12 @@
+{
+  "name": "@vscode/os-proxy-resolver-win32-arm64-msvc",
+  "version": "0.1.0",
+  "description": "Native binding for @vscode/os-proxy-resolver on Windows arm64",
+  "main": "os_proxy_resolver.node",
+  "files": ["os_proxy_resolver.node", "LICENSE.txt", "ThirdPartyNotices.txt"],
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "publishConfig": { "access": "public" },
+  "license": "MIT",
+  "repository": "github:microsoft/os-proxy-resolver"
+}

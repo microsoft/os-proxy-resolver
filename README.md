@@ -205,9 +205,43 @@ The benchmark cross-checks all engines and fails if the embedded backends
 (byte-identical engine sources) disagree on any URL; it also reports the size
 of the embedded AOT-compiled guest module.
 
-Builds as both `rlib` and `cdylib`. Release automation with `cargo-dist` is a
-natural fit (the CI matrix below already covers the seven targets) but is not
-wired up yet.
+Builds as both `rlib` and `cdylib`.
+
+## Node.js package
+
+`@vscode/os-proxy-resolver` exposes the resolver through Node-API, with
+prebuilt addons for Windows and macOS x64/arm64 and glibc Linux
+x64/arm64/armhf. The public package selects a platform-specific optional
+dependency at runtime, so consumers install only the addon they need. Every
+addon uses the `pac-engine-wasm2c` backend; consumers do not need Rust, a C
+compiler, or WABT installed.
+
+Linux addons are built with the pinned glibc 2.28 sysroots from the shared
+`vscode-engineering` npm pipeline and then inspected with that toolchain's
+`objdump`; publishing fails if any final `.node` artifact requires a GLIBC
+symbol newer than 2.28. This keeps them compatible with VS Code's glibc 2.28
+desktop baseline.
+
+```js
+const { resolveProxy, ProxyResolver } = require('@vscode/os-proxy-resolver');
+
+const proxies = await resolveProxy('https://example.com/');
+const resolver = new ProxyResolver();
+const subscription = resolver.onChange(() => { /* proxy config changed */ });
+resolver.offChange(subscription);
+resolver.close();
+```
+
+Resolution is dispatched to libuv's worker pool because PAC fetching, WPAD,
+DNS, and operating-system APIs can block. The addon uses Node-API rather than
+the Electron ABI, so the same binary works in supported Node.js and Electron
+versions.
+
+The Azure Pipeline in [`azure-pipelines/publish.yml`](azure-pipelines/publish.yml)
+uses the shared `vscode-engineering` npm-package template. It publishes all
+seven native packages before the facade, with independent switches for npm
+and the VS Code Azure Artifacts feed. Keep the version in the root and all
+platform `package.json` files identical; `npm run verify:packages` checks this.
 
 ## CI
 

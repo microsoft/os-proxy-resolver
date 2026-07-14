@@ -1,0 +1,13 @@
+{
+  "name": "@vscode/os-proxy-resolver-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Native binding for @vscode/os-proxy-resolver on Linux x64",
+  "main": "os_proxy_resolver.node",
+  "files": ["os_proxy_resolver.node", "LICENSE.txt", "ThirdPartyNotices.txt"],
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "publishConfig": { "access": "public" },
+  "license": "MIT",
+  "repository": "github:microsoft/os-proxy-resolver"
+}

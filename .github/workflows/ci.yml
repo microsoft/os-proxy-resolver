@@ -148,7 +148,7 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --locked
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Build
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} build --target ${{ matrix.target }} ${{ matrix.features }} --examples
@@ -157,6 +157,16 @@ jobs:
       - name: Test
         if: matrix.run_tests
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} ${{ matrix.features }}
+        shell: bash
+
+      - name: Build Node addon (wasm2c)
+        if: ${{ !matrix.use_cross }}
+        run: node npm/scripts/build-native.js ${{ matrix.target }}
+        shell: bash
+
+      - name: Test Node addon
+        if: ${{ !matrix.use_cross }}
+        run: node npm/test/smoke.js
         shell: bash
 
       - name: Build proxytester (release)
@@ -547,10 +557,13 @@ jobs:
             | tar xz --strip-components=1 -C "$HOME/wabt"
           echo "$HOME/wabt/bin" >> "$GITHUB_PATH"
       - run: cargo fmt --check
+      - run: cargo fmt --manifest-path npm/native/Cargo.toml --check
       - run: cargo clippy --all-features --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path npm/native/Cargo.toml --all-targets -- -D warnings
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+      - run: npm run verify:packages
 
   licenses:
     name: licenses (deny + notices)
@@ -580,6 +593,12 @@ jobs:
           cargo about generate --all-features about.hbs > ThirdPartyNotices.generated.txt
           if ! diff -u -B -w ThirdPartyNotices.txt ThirdPartyNotices.generated.txt; then
             echo "::error::ThirdPartyNotices.txt is out of date. Run: cargo about generate --all-features about.hbs > ThirdPartyNotices.txt"
+            exit 1
+          fi
+          cargo about generate --manifest-path npm/native/Cargo.toml --config about.toml \
+            --locked --fail --output-file npm/ThirdPartyNotices.generated.txt npm/about.hbs
+          if ! diff -u -B -w npm/ThirdPartyNotices.txt npm/ThirdPartyNotices.generated.txt; then
+            echo "::error::npm/ThirdPartyNotices.txt is out of date. Run: cargo about generate --manifest-path npm/native/Cargo.toml --config about.toml --locked --fail --output-file npm/ThirdPartyNotices.txt npm/about.hbs"
             exit 1
           fi
 

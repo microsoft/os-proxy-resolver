@@ -12,3 +12,14 @@
 
 [build.env]
 passthrough = ["OS_PROXY_RESOLVER_PAC_GUEST_C_DIR"]
+
+# Pin the cross-compilation CI toolchains instead of inheriting whatever images
+# a future `cross` release selects. These images use glibc 2.23.
+[target.x86_64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/x86_64-unknown-linux-gnu:0.2.5"
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5"
+
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:0.2.5"

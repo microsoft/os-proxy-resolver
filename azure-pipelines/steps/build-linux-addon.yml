@@ -1,0 +1,39 @@
+parameters:
+  - name: target
+    type: string
+  - name: test
+    type: boolean
+    default: false
+
+steps:
+  - bash: |
+      set -e
+      mkdir -p "$(Agent.TempDirectory)/wabt" pac-wasm-guest/generated
+      curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz" \
+        | tar xz --strip-components=1 -C "$(Agent.TempDirectory)/wabt"
+      "$(Agent.TempDirectory)/wabt/bin/wasm2c" pac-wasm-guest/pac_guest.wasm --module-name pac_guest \
+        -o pac-wasm-guest/generated/pac_guest.c
+      OS_PROXY_RESOLVER_PAC_GUEST_C_DIR=pac-wasm-guest/generated \
+        npm/scripts/build-linux-native.sh ${{ parameters.target }}
+    displayName: Build Linux addon
+
+  - ${{ if parameters.test }}:
+      - ${{ if eq(parameters.target, 'x86_64-unknown-linux-gnu') }}:
+          - script: npm run test:npm
+            displayName: Test Linux x64 addon
+      - ${{ else }}:
+          - bash: |
+              set -e
+              sudo docker run --rm --privileged \
+                tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541 \
+                --install arm64,arm
+              case '${{ parameters.target }}' in
+                aarch64-unknown-linux-gnu) platform=linux/arm64 ;;
+                armv7-unknown-linux-gnueabihf) platform=linux/arm/v7 ;;
+                *) echo 'Unsupported emulated target: ${{ parameters.target }}' >&2; exit 2 ;;
+              esac
+              sudo docker run --rm --platform "$platform" \
+                -v "$(Build.SourcesDirectory):/workspace" -w /workspace \
+                node:22.22.0-bookworm@sha256:20a424ecd1d2064a44e12fe287bf3dae443aab31dc5e0c0cb6c74bef9c78911c \
+                node npm/test/smoke.js
+            displayName: Test Linux ARM addon under QEMU
