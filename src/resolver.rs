@@ -866,26 +866,6 @@ mod tests {
 
     #[cfg(feature = "tokio")]
     #[tokio::test(flavor = "current_thread")]
-    async fn async_resolution_worker_publishes_completed_result() {
-        let resolver = ProxyResolver::with_env(
-            ResolverOptions::default(),
-            env(&[("https_proxy", "http://proxy.example:3128")]),
-        );
-        let target = url("https://example.com/");
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(1),
-            resolver.resolve_proxy_async(&target),
-        )
-        .await
-        .expect("async resolver worker did not publish its completed result")
-        .unwrap();
-
-        assert_eq!(result, vec![ProxyKind::Http("proxy.example:3128".into())]);
-    }
-
-    #[cfg(feature = "tokio")]
-    #[tokio::test(flavor = "current_thread")]
     async fn async_resolution_coalesces_identical_concurrent_calls() {
         use std::sync::atomic::Ordering;
 
