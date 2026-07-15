@@ -33,3 +33,4 @@ try {
 const binding = require(packageName);
 exports.ProxyResolver = binding.ProxyResolver;
 exports.resolveProxy = binding.resolveProxy;
+exports.readProxyConfig = binding.readProxyConfig;

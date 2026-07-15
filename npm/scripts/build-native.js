@@ -42,6 +42,7 @@ const [packageDirectory, library] = targets[target];
 const source = path.join(root, 'target', 'npm', target, 'release', library);
 const packagePath = path.join(root, 'npm', 'platforms', packageDirectory);
 const destination = path.join(packagePath, 'os_proxy_resolver.node');
+fs.rmSync(destination, { force: true });
 fs.copyFileSync(source, destination);
 fs.copyFileSync(path.join(root, 'LICENSE.txt'), path.join(packagePath, 'LICENSE.txt'));
 fs.copyFileSync(path.join(root, 'npm', 'ThirdPartyNotices.txt'), path.join(packagePath, 'ThirdPartyNotices.txt'));

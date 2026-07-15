@@ -43,10 +43,12 @@
 //! | macOS | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
 //! | Linux | GNOME `org.gnome.system.proxy` (gsettings) | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
 //!
-//! On Windows no JS engine is built or linked — PAC evaluation, DHCP and DNS
-//! WPAD are all WinHTTP's. On macOS/Linux, DHCP-based WPAD (option 252) is a
-//! documented non-goal; DNS-based WPAD walks `wpad.<search-domain>` with
-//! tight timeouts.
+//! On Windows no JS engine is built or linked — normal PAC evaluation and
+//! WPAD resolution are WinHTTP's. Configuration inspection uses the shared
+//! DNS WPAD discovery path so it can return the discovered script and URL;
+//! DHCP option 252 remains WinHTTP-only. On macOS/Linux, DHCP-based WPAD is a
+//! documented non-goal; DNS-based WPAD walks `wpad.<search-domain>` with tight
+//! timeouts.
 //!
 //! # The PAC cage
 //!
@@ -88,7 +90,6 @@
 
 mod bypass;
 mod env_cfg;
-#[cfg(not(windows))]
 mod fetch;
 mod notify;
 // The PAC subsystem is present whenever an embedded engine is compiled in, and
@@ -106,7 +107,6 @@ mod pac;
 mod platform;
 mod resolver;
 mod types;
-#[cfg(not(windows))]
 mod wpad;
 
 // Off Windows there is no OS PAC evaluator, so at least one embedded backend
@@ -128,7 +128,10 @@ compile_error!(
 
 pub use notify::Subscription;
 pub use resolver::{ProxyResolver, ResolverOptions};
-pub use types::{Error, PacBackendKind, ProxyKind, Result};
+pub use types::{
+    Error, LinuxProxyConfig, MacosProxyConfig, PacBackendKind, PacScript, PacScriptSource,
+    PlatformProxyConfig, ProxyConfig, ProxyKind, Result, StaticProxyRules, WindowsProxyConfig,
+};
 
 /// Size in bytes of the embedded ahead-of-time-compiled PAC guest module —
 /// the dominant binary-size contribution of the `pac-engine-wasmtime`
@@ -146,6 +149,12 @@ pub fn pac_wasm_artifact_size() -> usize {
 /// See [`ProxyResolver::resolve_proxy`] for semantics and blocking behavior.
 pub fn resolve_proxy(url: &url::Url) -> Result<Vec<ProxyKind>> {
     ProxyResolver::global().resolve_proxy(url)
+}
+
+/// Read the operating-system proxy configuration using the process-wide
+/// [`ProxyResolver`]. See [`ProxyResolver::read_proxy_config`] for details.
+pub fn read_proxy_config() -> ProxyConfig {
+    ProxyResolver::global().read_proxy_config()
 }
 
 /// Resolve the ordered proxy list asynchronously using the process-wide

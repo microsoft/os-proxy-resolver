@@ -5,6 +5,100 @@
 
 use std::fmt;
 
+/// A snapshot of the proxy configuration read from the operating system.
+///
+/// This API does not consider proxy environment variables and never evaluates
+/// a PAC script. When auto-detection is enabled, DNS WPAD discovery is
+/// attempted before the explicitly configured PAC URL, matching proxy
+/// resolution precedence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProxyConfig {
+    /// Whether the operating system requested automatic proxy discovery.
+    pub auto_detect: bool,
+    /// The explicit PAC URL configured by the operating system, whether or not
+    /// it could be loaded.
+    pub pac_url: Option<String>,
+    /// The first PAC script available by resolution precedence, if one could
+    /// be discovered or loaded.
+    pub pac: Option<PacScript>,
+    /// Normalized static proxy settings, if configured.
+    pub static_rules: Option<StaticProxyRules>,
+    /// Source-specific settings retained where the platform exposes them.
+    pub platform: Option<PlatformProxyConfig>,
+}
+
+/// A PAC script loaded from an operating-system setting or DNS WPAD.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PacScript {
+    /// The configured or discovered URL from which `content` was loaded.
+    pub url: String,
+    /// The PAC JavaScript source. It has not been evaluated.
+    pub content: String,
+    /// How this PAC script was selected.
+    pub source: PacScriptSource,
+}
+
+/// The source of a loaded PAC script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PacScriptSource {
+    /// Found through DNS WPAD (`http://wpad.<domain>/wpad.dat`).
+    Wpad,
+    /// Loaded from the explicit PAC URL configured by the operating system.
+    Configured,
+}
+
+/// Normalized static proxy settings from the operating system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StaticProxyRules {
+    /// Proxy for plain HTTP and WebSocket requests.
+    pub http: Option<ProxyKind>,
+    /// Proxy for HTTPS and secure WebSocket requests.
+    pub https: Option<ProxyKind>,
+    /// SOCKS fallback for schemes without a specific proxy.
+    pub socks: Option<ProxyKind>,
+}
+
+/// Raw settings retained from the platform configuration source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlatformProxyConfig {
+    /// Windows WinINET/WinHTTP settings.
+    Windows(WindowsProxyConfig),
+    /// macOS SystemConfiguration settings.
+    Macos(MacosProxyConfig),
+    /// GNOME GSettings values on Linux.
+    Linux(LinuxProxyConfig),
+}
+
+/// Raw Windows proxy settings returned by
+/// `WinHttpGetIEProxyConfigForCurrentUser`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct WindowsProxyConfig {
+    pub proxy: Option<String>,
+    pub proxy_bypass: Option<String>,
+}
+
+/// Additional macOS SystemConfiguration proxy settings.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct MacosProxyConfig {
+    pub exceptions: Vec<String>,
+    pub exclude_simple_hostnames: bool,
+}
+
+/// Additional GNOME proxy settings on Linux.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct LinuxProxyConfig {
+    pub mode: Option<String>,
+    pub ignore_hosts: Vec<String>,
+}
+
 /// A single hop of a proxy resolution result, mirroring PAC semantics.
 ///
 /// A PAC result like `"PROXY a:8080; SOCKS b:1080; DIRECT"` becomes

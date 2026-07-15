@@ -3,9 +3,11 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! DNS-based WPAD discovery (macOS/Linux only — Windows gets WPAD, including
-//! DHCP option 252, from WinHTTP). DHCP-based WPAD is a documented non-goal
-//! here.
+//! DNS-based WPAD discovery. Normal Windows URL resolution delegates WPAD,
+//! including DHCP option 252, to WinHTTP; this DNS-only implementation is used
+//! there by the configuration inspection API so it can return script content
+//! and the discovered URL. DHCP-based discovery is otherwise a documented
+//! non-goal here.
 //!
 //! Strategy: take the DNS search domains from the OS resolver configuration
 //! (macOS `SCDynamicStore`, Linux `/etc/resolv.conf`), and for each, walk up
@@ -24,9 +26,15 @@ use std::net::ToSocketAddrs;
 use std::sync::mpsc;
 use std::time::Duration;
 
-/// Returns the fetched `wpad.dat` PAC script, or `None` when this network has
-/// no (usable) WPAD.
-pub(crate) fn discover(dns_timeout: Duration, fetch_timeout: Duration) -> Option<String> {
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveredPac {
+    pub url: String,
+    pub content: String,
+}
+
+/// Returns the fetched `wpad.dat` PAC script and its discovered URL, or `None`
+/// when this network has no usable DNS WPAD.
+pub(crate) fn discover(dns_timeout: Duration, fetch_timeout: Duration) -> Option<DiscoveredPac> {
     discover_with_domains(&search_domains(), dns_timeout, fetch_timeout)
 }
 
@@ -34,16 +42,31 @@ fn discover_with_domains(
     domains: &[String],
     dns_timeout: Duration,
     fetch_timeout: Duration,
-) -> Option<String> {
+) -> Option<DiscoveredPac> {
+    discover_with_domains_using(
+        domains,
+        |candidate| resolves(candidate, dns_timeout),
+        |url| fetch_pac(url, fetch_timeout),
+    )
+}
+
+fn discover_with_domains_using(
+    domains: &[String],
+    mut resolves: impl FnMut(&str) -> bool,
+    mut fetch: impl FnMut(&str) -> crate::Result<String>,
+) -> Option<DiscoveredPac> {
     for candidate in candidate_hosts(domains) {
-        if !resolves(&candidate, dns_timeout) {
+        if !resolves(&candidate) {
             continue;
         }
         let url = format!("http://{candidate}/wpad.dat");
-        match fetch_pac(&url, fetch_timeout) {
+        match fetch(&url) {
             Ok(script) if script.contains("FindProxyForURL") => {
                 log::info!("WPAD: using {url}");
-                return Some(script);
+                return Some(DiscoveredPac {
+                    url,
+                    content: script,
+                });
             }
             Ok(_) => log::warn!("WPAD: {url} does not look like a PAC script, skipping"),
             Err(e) => log::debug!("WPAD: {e}"),
@@ -177,5 +200,20 @@ mod tests {
         let start = std::time::Instant::now();
         let _ = resolves("wpad.example.invalid", Duration::from_millis(200));
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn returns_discovered_url_with_script() {
+        let pac = discover_with_domains_using(
+            &["corp.example.com".into()],
+            |host| host == "wpad.corp.example.com",
+            |url| {
+                assert_eq!(url, "http://wpad.corp.example.com/wpad.dat");
+                Ok("function FindProxyForURL() { return 'DIRECT'; }".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(pac.url, "http://wpad.corp.example.com/wpad.dat");
+        assert!(pac.content.contains("FindProxyForURL"));
     }
 }

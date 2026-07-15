@@ -64,6 +64,8 @@ pac-engine-wasmtime-jit = ["dep:wasmtime", "wasmtime/cranelift"]
 url = "2"
 log = "0.4"
 tokio = { version = "1", optional = true, default-features = false, features = ["sync"] }
+# Public Suffix List used to stop the WPAD suffix walk at the registrable domain.
+psl = "2"
 # Runtime for the sandboxed PAC backend, in AOT mode only: `runtime` + `std`
 # but deliberately NO `cranelift` (or `winch`/`pulley`), so this build cannot
 # compile wasm at all — it can only `Module::deserialize` the artifact that
@@ -91,11 +93,6 @@ cc = { version = "1", optional = true }
 [target.'cfg(not(windows))'.dependencies]
 # PAC / wpad.dat fetching. Sync, small, rustls-backed so no OpenSSL cross headaches.
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
-# Public Suffix List (compiled in) used to stop the WPAD suffix walk at the
-# registrable domain (eTLD+1), matching browser behaviour: `wpad.com` and
-# multi-label cases like `wpad.co.uk` are never queried. Non-Windows only —
-# WPAD DNS discovery lives in wpad.rs, which Windows delegates to WinHTTP.
-psl = "2"
 # Embedded QuickJS-NG (MIT) for the native PAC engine. Vendors and compiles the
 # quickjs-ng C sources via `cc`. Optional (feature `pac-engine`) so a
 # Wasmtime-only build links no C engine.
@@ -108,7 +105,10 @@ system-configuration = "0.6"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinHttp",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_System_Registry",
     "Win32_System_Threading",

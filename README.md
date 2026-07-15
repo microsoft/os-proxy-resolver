@@ -160,6 +160,31 @@ JS). The payload is intentionally dumb: "changed", no diff.
 VPN connect, Wi-Fi switch, and resume all invalidate cached PAC state: caches
 store the generation they were built at and re-resolve when it moves.
 
+## Reading the OS configuration
+
+Use `read_proxy_config` to inspect the operating-system proxy settings without
+resolving a URL or evaluating JavaScript:
+
+```rust
+let config = os_proxy_resolver::read_proxy_config();
+
+if let Some(pac) = config.pac {
+  println!("PAC URL: {}", pac.url);
+  println!("PAC source: {:?}", pac.source);
+  println!("PAC content: {} bytes", pac.content.len());
+}
+```
+
+The snapshot includes normalized static HTTP/HTTPS/SOCKS rules and, when the
+native source was available, source-specific settings from WinHTTP,
+SystemConfiguration, or GNOME GSettings. Proxy environment variables are not
+included. If auto-detection is enabled, the call performs DNS WPAD discovery
+first; if no usable `wpad.dat` is found, it loads the configured PAC URL. PAC
+loading is best-effort and synchronous, using the timeouts in `ResolverOptions`.
+The returned script includes its configured or discovered URL and is never
+evaluated. Windows DNS WPAD uses adapter DNS suffixes; DHCP option 252 remains
+part of WinHTTP URL resolution only and is not queried by this inspection API.
+
 ## Bad-proxy feedback
 
 ```rust
@@ -223,9 +248,14 @@ symbol newer than 2.28. This keeps them compatible with VS Code's glibc 2.28
 desktop baseline.
 
 ```js
-const { resolveProxy, ProxyResolver } = require('@vscode/os-proxy-resolver');
+const {
+  readProxyConfig,
+  resolveProxy,
+  ProxyResolver,
+} = require('@vscode/os-proxy-resolver');
 
 const proxies = await resolveProxy('https://example.com/');
+const config = await readProxyConfig(); // loads PAC/WPAD, but does not evaluate it
 const resolver = new ProxyResolver();
 const subscription = resolver.onChange(() => { /* proxy config changed */ });
 resolver.offChange(subscription);

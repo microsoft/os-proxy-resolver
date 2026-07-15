@@ -22,6 +22,72 @@ export interface Proxy {
 	host?: string;
 }
 
+/** How a PAC script was selected. */
+export type PacScriptSource = 'wpad' | 'configured' | 'unknown';
+
+/** A PAC script loaded from an OS setting or DNS WPAD, but not evaluated. */
+export interface PacScript {
+	/** The configured or discovered URL from which {@link content} was loaded. */
+	url: string;
+	/** The PAC JavaScript source. */
+	content: string;
+	/** Whether the script came from DNS WPAD or an explicit OS setting. */
+	source: PacScriptSource;
+}
+
+/** Normalized static proxy settings read from the operating system. */
+export interface StaticProxyRules {
+	/** Proxy for HTTP and WebSocket requests. */
+	http?: Proxy;
+	/** Proxy for HTTPS and secure WebSocket requests. */
+	https?: Proxy;
+	/** SOCKS fallback for schemes without a specific proxy. */
+	socks?: Proxy;
+}
+
+/** Raw Windows WinINET/WinHTTP proxy settings. */
+export interface WindowsProxyConfig {
+	kind: 'windows';
+	proxy?: string;
+	proxyBypass?: string;
+}
+
+/** Additional macOS SystemConfiguration proxy settings. */
+export interface MacosProxyConfig {
+	kind: 'macos';
+	exceptions: string[];
+	excludeSimpleHostnames: boolean;
+}
+
+/** Additional GNOME GSettings proxy settings on Linux. */
+export interface LinuxProxyConfig {
+	kind: 'linux';
+	mode?: string;
+	ignoreHosts: string[];
+}
+
+/** A future platform configuration not recognized by this package version. */
+export interface UnknownPlatformProxyConfig {
+	kind: 'unknown';
+}
+
+/** Source-specific settings retained where the operating system exposes them. */
+export type PlatformProxyConfig = WindowsProxyConfig | MacosProxyConfig | LinuxProxyConfig | UnknownPlatformProxyConfig;
+
+/** A snapshot of the current operating-system proxy configuration. */
+export interface ProxyConfig {
+	/** Whether the operating system requested automatic proxy discovery. */
+	autoDetect: boolean;
+	/** The configured PAC URL, even if the script could not be loaded. */
+	pacUrl?: string;
+	/** The first PAC script available by resolution precedence. */
+	pac?: PacScript;
+	/** Normalized static proxy settings, if configured. */
+	staticRules?: StaticProxyRules;
+	/** Raw source-specific settings, if the native source was available. */
+	platform?: PlatformProxyConfig;
+}
+
 /**
  * Resolves the proxy configuration for multiple URLs while retaining proxy
  * configuration caches, change notifications, and failed-proxy state.
@@ -44,6 +110,16 @@ export declare class ProxyResolver {
 	 * @throws If `url` is invalid, has no host, or an operating-system API fails.
 	 */
 	resolve(url: string): Promise<Proxy[]>;
+
+	/**
+	 * Reads the operating-system proxy configuration without evaluating PAC.
+	 *
+	 * Proxy environment variables are not included. If auto-detection is
+	 * enabled, DNS WPAD discovery runs before the configured PAC URL is loaded.
+	 * Potentially blocking OS, DNS, and network work runs outside the JavaScript
+	 * event loop.
+	 */
+	readProxyConfig(): Promise<ProxyConfig>;
 
 	/**
 	 * A monotonically increasing value that changes when the operating-system
@@ -89,3 +165,9 @@ export declare class ProxyResolver {
  * when change notifications or failed-proxy reporting are needed.
  */
 export declare function resolveProxy(url: string): Promise<Proxy[]>;
+
+/**
+ * Reads the operating-system proxy configuration using a process-wide
+ * {@link ProxyResolver}. PAC scripts are loaded but never evaluated.
+ */
+export declare function readProxyConfig(): Promise<ProxyConfig>;

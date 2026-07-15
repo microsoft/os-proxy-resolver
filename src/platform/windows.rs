@@ -16,11 +16,17 @@
 
 use super::{OsProxyConfig, StaticRules};
 use crate::bypass::BypassRules;
-use crate::types::{with_default_port, Error, ProxyKind, Result};
+use crate::types::{
+    with_default_port, Error, PlatformProxyConfig, ProxyKind, Result, WindowsProxyConfig,
+};
 use std::ffi::c_void;
 use std::sync::Arc;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, GlobalFree, HANDLE, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, GlobalFree, ERROR_BUFFER_OVERFLOW, HANDLE, WAIT_OBJECT_0,
+};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
+    GAA_FLAG_SKIP_UNICAST, IP_ADAPTER_ADDRESSES_LH,
 };
 use windows_sys::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpGetIEProxyConfigForCurrentUser, WinHttpGetProxyForUrl, WinHttpOpen,
@@ -28,6 +34,7 @@ use windows_sys::Win32::Networking::WinHttp::{
     WINHTTP_AUTOPROXY_OPTIONS, WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_AUTO_DETECT_TYPE_DNS_A,
     WINHTTP_CURRENT_USER_IE_PROXY_CONFIG, WINHTTP_PROXY_INFO,
 };
+use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_NOTIFY,
     REG_NOTIFY_CHANGE_LAST_SET, REG_NOTIFY_CHANGE_NAME,
@@ -73,6 +80,10 @@ pub(crate) fn read_config() -> OsProxyConfig {
     let mut config = OsProxyConfig {
         auto_detect: ie.fAutoDetect != 0,
         pac_url,
+        platform: Some(PlatformProxyConfig::Windows(WindowsProxyConfig {
+            proxy: proxy.clone(),
+            proxy_bypass: bypass.clone(),
+        })),
         ..Default::default()
     };
     if let Some(proxy) = proxy {
@@ -85,6 +96,86 @@ pub(crate) fn read_config() -> OsProxyConfig {
         }
     }
     config
+}
+
+/// Connection-specific DNS suffixes used for DNS WPAD candidate generation.
+pub(crate) fn dns_search_domains() -> Vec<String> {
+    let flags = GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_DNS_SERVER
+        | GAA_FLAG_SKIP_UNICAST;
+    let mut size = 0;
+    let first = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            flags,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if first != ERROR_BUFFER_OVERFLOW || size == 0 {
+        return Vec::new();
+    }
+    let word_size = std::mem::size_of::<usize>();
+    let mut buffer = vec![0usize; (size as usize).div_ceil(word_size)];
+    let adapters = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    if unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            flags,
+            std::ptr::null(),
+            adapters,
+            &mut size,
+        )
+    } != 0
+    {
+        return Vec::new();
+    }
+
+    let mut domains = Vec::new();
+    let mut adapter = adapters;
+    while !adapter.is_null() {
+        let current = unsafe { &*adapter };
+        push_wide_domain(&mut domains, current.DnsSuffix);
+        let mut suffix = current.FirstDnsSuffix;
+        while !suffix.is_null() {
+            let current_suffix = unsafe { &*suffix };
+            let len = current_suffix
+                .String
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(current_suffix.String.len());
+            push_domain(
+                &mut domains,
+                String::from_utf16_lossy(&current_suffix.String[..len]),
+            );
+            suffix = current_suffix.Next;
+        }
+        adapter = current.Next;
+    }
+    domains
+}
+
+fn push_wide_domain(domains: &mut Vec<String>, ptr: *const u16) {
+    if ptr.is_null() {
+        return;
+    }
+    let mut len = 0;
+    while unsafe { *ptr.add(len) } != 0 {
+        len += 1;
+    }
+    push_domain(
+        domains,
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }),
+    );
+}
+
+fn push_domain(domains: &mut Vec<String>, domain: String) {
+    let domain = domain.trim().trim_matches('.').to_string();
+    if !domain.is_empty() && !domains.contains(&domain) {
+        domains.push(domain);
+    }
 }
 
 /// Parse the WinHTTP/WinINET static proxy format:

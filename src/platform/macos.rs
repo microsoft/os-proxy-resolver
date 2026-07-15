@@ -10,7 +10,7 @@
 
 use super::{OsProxyConfig, StaticRules};
 use crate::bypass::BypassRules;
-use crate::types::ProxyKind;
+use crate::types::{MacosProxyConfig, PlatformProxyConfig, ProxyKind};
 use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFGetTypeID, CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
@@ -32,6 +32,7 @@ pub(crate) fn read_config() -> OsProxyConfig {
         return OsProxyConfig::default();
     };
 
+    let exclude_simple_hostnames = get_flag(&proxies, "ExcludeSimpleHostnames");
     let mut config = OsProxyConfig {
         auto_detect: get_flag(&proxies, "ProxyAutoDiscoveryEnable"),
         ..Default::default()
@@ -70,7 +71,11 @@ pub(crate) fn read_config() -> OsProxyConfig {
     rules.bypass = BypassRules::parse(exceptions.iter().map(|s| s.as_str()));
     rules
         .bypass
-        .set_bypass_simple_hostnames(get_flag(&proxies, "ExcludeSimpleHostnames"));
+        .set_bypass_simple_hostnames(exclude_simple_hostnames);
+    config.platform = Some(PlatformProxyConfig::Macos(MacosProxyConfig {
+        exceptions,
+        exclude_simple_hostnames,
+    }));
     if !rules.is_empty() {
         config.static_rules = Some(rules);
     }
