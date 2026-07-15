@@ -14,7 +14,7 @@
 //!   the watcher on drop.
 
 use crate::bypass::BypassRules;
-use crate::types::ProxyKind;
+use crate::types::{PlatformProxyConfig, ProxyKind};
 
 #[cfg(target_os = "macos")]
 #[path = "macos.rs"]
@@ -33,7 +33,6 @@ pub(crate) use imp::{read_config, spawn_watcher, Watcher};
 /// The OS-configured DNS search domains, used to derive `wpad.<domain>`
 /// candidates. macOS reads them from `SCDynamicStore`; Linux from
 /// `/etc/resolv.conf`.
-#[cfg(not(windows))]
 pub(crate) use imp::dns_search_domains;
 
 /// DNS search domains parsed from `/etc/resolv.conf` (`search` / `domain`
@@ -72,6 +71,7 @@ pub(crate) struct OsProxyConfig {
     pub auto_detect: bool,
     pub pac_url: Option<String>,
     pub static_rules: Option<StaticRules>,
+    pub platform: Option<PlatformProxyConfig>,
 }
 
 #[derive(Debug, Clone, Default)]

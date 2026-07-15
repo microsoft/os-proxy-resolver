@@ -8,6 +8,7 @@ const binding = require(path.resolve(__dirname, '..', 'platforms', platformPacka
 
 async function main() {
 	assert.strictEqual(typeof binding.resolveProxy, 'function');
+	assert.strictEqual(typeof binding.readProxyConfig, 'function');
 	assert.strictEqual(typeof binding.ProxyResolver, 'function');
 
 	const proxies = await binding.resolveProxy('https://example.com/');
@@ -18,7 +19,18 @@ async function main() {
 	}
 
 	const resolver = new binding.ProxyResolver();
+	assert.strictEqual(typeof resolver.readProxyConfig, 'function');
 	assert.strictEqual(typeof resolver.configGeneration, 'number');
+	const config = await resolver.readProxyConfig();
+	assert.strictEqual(typeof config.autoDetect, 'boolean');
+	if (config.pac) {
+		assert.strictEqual(typeof config.pac.url, 'string');
+		assert.strictEqual(typeof config.pac.content, 'string');
+		assert.ok(['wpad', 'configured', 'unknown'].includes(config.pac.source));
+	}
+	if (config.platform) {
+		assert.ok(['windows', 'macos', 'linux', 'unknown'].includes(config.platform.kind));
+	}
 	resolver.reportProxyFailed({ kind: 'direct' });
 	resolver.close();
 }

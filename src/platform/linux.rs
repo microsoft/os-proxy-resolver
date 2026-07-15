@@ -17,7 +17,7 @@
 
 use super::{OsProxyConfig, StaticRules};
 use crate::bypass::BypassRules;
-use crate::types::ProxyKind;
+use crate::types::{LinuxProxyConfig, PlatformProxyConfig, ProxyKind};
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::process::{Child, Command, Stdio};
@@ -54,7 +54,16 @@ fn parse_gsettings_output(text: &str) -> OsProxyConfig {
     };
 
     let mode = get("", "mode").map(unquote).unwrap_or_default();
-    let mut config = OsProxyConfig::default();
+    let ignore_hosts = get("", "ignore-hosts")
+        .map(parse_string_array)
+        .unwrap_or_default();
+    let mut config = OsProxyConfig {
+        platform: Some(PlatformProxyConfig::Linux(LinuxProxyConfig {
+            mode: (!mode.is_empty()).then(|| mode.clone()),
+            ignore_hosts: ignore_hosts.clone(),
+        })),
+        ..Default::default()
+    };
     match mode.as_str() {
         "auto" => {
             config.pac_url = get("", "autoconfig-url")
@@ -70,10 +79,7 @@ fn parse_gsettings_output(text: &str) -> OsProxyConfig {
                 host_port(get(".https", "host"), get(".https", "port")).map(ProxyKind::Http);
             rules.socks =
                 host_port(get(".socks", "host"), get(".socks", "port")).map(ProxyKind::Socks);
-            let ignore = get("", "ignore-hosts")
-                .map(parse_string_array)
-                .unwrap_or_default();
-            rules.bypass = BypassRules::parse(ignore.iter().map(|s| s.as_str()));
+            rules.bypass = BypassRules::parse(ignore_hosts.iter().map(|s| s.as_str()));
             if !rules.is_empty() {
                 config.static_rules = Some(rules);
             }

@@ -11,7 +11,9 @@ use napi::bindgen_prelude::{AsyncTask, Task};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Error, JsFunction, JsUnknown, Result, Status};
 use napi_derive::napi;
-use os_proxy_resolver::{ProxyKind, Subscription};
+use os_proxy_resolver::{
+    PacScriptSource, PlatformProxyConfig, ProxyKind, StaticProxyRules, Subscription,
+};
 
 #[napi(object)]
 pub struct Proxy {
@@ -62,6 +64,114 @@ impl TryFrom<&Proxy> for ProxyKind {
     }
 }
 
+#[napi(object)]
+pub struct NodePacScript {
+    pub url: String,
+    pub content: String,
+    pub source: String,
+}
+
+#[napi(object)]
+pub struct NodeStaticProxyRules {
+    pub http: Option<Proxy>,
+    pub https: Option<Proxy>,
+    pub socks: Option<Proxy>,
+}
+
+impl From<StaticProxyRules> for NodeStaticProxyRules {
+    fn from(rules: StaticProxyRules) -> Self {
+        Self {
+            http: rules.http.map(Proxy::from),
+            https: rules.https.map(Proxy::from),
+            socks: rules.socks.map(Proxy::from),
+        }
+    }
+}
+
+#[napi(object)]
+pub struct NodePlatformProxyConfig {
+    pub kind: String,
+    pub proxy: Option<String>,
+    pub proxy_bypass: Option<String>,
+    pub exceptions: Option<Vec<String>>,
+    pub exclude_simple_hostnames: Option<bool>,
+    pub mode: Option<String>,
+    pub ignore_hosts: Option<Vec<String>>,
+}
+
+impl From<PlatformProxyConfig> for NodePlatformProxyConfig {
+    fn from(config: PlatformProxyConfig) -> Self {
+        match config {
+            PlatformProxyConfig::Windows(config) => Self {
+                kind: "windows".into(),
+                proxy: config.proxy,
+                proxy_bypass: config.proxy_bypass,
+                exceptions: None,
+                exclude_simple_hostnames: None,
+                mode: None,
+                ignore_hosts: None,
+            },
+            PlatformProxyConfig::Macos(config) => Self {
+                kind: "macos".into(),
+                proxy: None,
+                proxy_bypass: None,
+                exceptions: Some(config.exceptions),
+                exclude_simple_hostnames: Some(config.exclude_simple_hostnames),
+                mode: None,
+                ignore_hosts: None,
+            },
+            PlatformProxyConfig::Linux(config) => Self {
+                kind: "linux".into(),
+                proxy: None,
+                proxy_bypass: None,
+                exceptions: None,
+                exclude_simple_hostnames: None,
+                mode: config.mode,
+                ignore_hosts: Some(config.ignore_hosts),
+            },
+            _ => Self {
+                kind: "unknown".into(),
+                proxy: None,
+                proxy_bypass: None,
+                exceptions: None,
+                exclude_simple_hostnames: None,
+                mode: None,
+                ignore_hosts: None,
+            },
+        }
+    }
+}
+
+#[napi(object)]
+pub struct NodeProxyConfig {
+    pub auto_detect: bool,
+    pub pac_url: Option<String>,
+    pub pac: Option<NodePacScript>,
+    pub static_rules: Option<NodeStaticProxyRules>,
+    pub platform: Option<NodePlatformProxyConfig>,
+}
+
+impl From<os_proxy_resolver::ProxyConfig> for NodeProxyConfig {
+    fn from(config: os_proxy_resolver::ProxyConfig) -> Self {
+        Self {
+            auto_detect: config.auto_detect,
+            pac_url: config.pac_url,
+            pac: config.pac.map(|pac| NodePacScript {
+                url: pac.url,
+                content: pac.content,
+                source: match pac.source {
+                    PacScriptSource::Wpad => "wpad",
+                    PacScriptSource::Configured => "configured",
+                    _ => "unknown",
+                }
+                .into(),
+            }),
+            static_rules: config.static_rules.map(NodeStaticProxyRules::from),
+            platform: config.platform.map(NodePlatformProxyConfig::from),
+        }
+    }
+}
+
 pub struct ResolveTask {
     resolver: os_proxy_resolver::ProxyResolver,
     url: String,
@@ -81,6 +191,23 @@ impl Task for ResolveTask {
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(output.into_iter().map(Proxy::from).collect())
+    }
+}
+
+pub struct ReadProxyConfigTask {
+    resolver: os_proxy_resolver::ProxyResolver,
+}
+
+impl Task for ReadProxyConfigTask {
+    type Output = os_proxy_resolver::ProxyConfig;
+    type JsValue = NodeProxyConfig;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(self.resolver.read_proxy_config())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(NodeProxyConfig::from(output))
     }
 }
 
@@ -107,6 +234,13 @@ impl NodeProxyResolver {
         AsyncTask::new(ResolveTask {
             resolver: self.resolver.clone(),
             url,
+        })
+    }
+
+    #[napi]
+    pub fn read_proxy_config(&self) -> AsyncTask<ReadProxyConfigTask> {
+        AsyncTask::new(ReadProxyConfigTask {
+            resolver: self.resolver.clone(),
         })
     }
 
@@ -168,5 +302,12 @@ pub fn resolve_proxy(url: String) -> AsyncTask<ResolveTask> {
     AsyncTask::new(ResolveTask {
         resolver: os_proxy_resolver::ProxyResolver::global().clone(),
         url,
+    })
+}
+
+#[napi]
+pub fn read_proxy_config() -> AsyncTask<ReadProxyConfigTask> {
+    AsyncTask::new(ReadProxyConfigTask {
+        resolver: os_proxy_resolver::ProxyResolver::global().clone(),
     })
 }
