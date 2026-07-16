@@ -2,8 +2,12 @@
 
 const assert = require('assert');
 const path = require('path');
+const { getPlatformPackage } = require('../../platform');
 
-const platformPackage = `${process.platform}-${process.arch === 'arm' ? 'arm-gnueabihf' : process.arch}${process.platform === 'linux' && process.arch !== 'arm' ? '-gnu' : process.platform === 'win32' ? '-msvc' : ''}`;
+const platformPackage = getPlatformPackage()
+	.replace('linux-arm-glibc', 'linux-arm-gnueabihf')
+	.replace(/-glibc$/, '-gnu')
+	.concat(process.platform === 'win32' ? '-msvc' : '');
 const binding = require(path.resolve(__dirname, '..', 'platforms', platformPackage, 'os_proxy_resolver.node'));
 
 async function main() {

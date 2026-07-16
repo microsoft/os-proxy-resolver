@@ -20,15 +20,22 @@ const CHILD_ENV: &str = "OS_PROXY_RESOLVER_ASYNC_WORKER_CHILD";
 /// report a bounded test failure instead of hanging the whole suite.
 #[test]
 fn async_resolution_worker_processes_second_distinct_request() {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "async_resolution_distinct_request_child",
             "--nocapture",
         ])
         .env(CHILD_ENV, "1")
-        .spawn()
-        .unwrap();
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) if error.raw_os_error() == Some(8) => {
+            eprintln!("skipping nested subprocess unsupported by this target runner");
+            return;
+        }
+        Err(error) => panic!("failed to spawn async resolver child: {error}"),
+    };
 
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {

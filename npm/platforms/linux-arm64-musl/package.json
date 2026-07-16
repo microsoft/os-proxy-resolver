@@ -1,11 +1,12 @@
 {
-  "name": "@vscode/os-proxy-resolver-win32-x64-msvc",
+  "name": "@vscode/os-proxy-resolver-linux-arm64-musl",
   "version": "0.3.0",
-  "description": "Native binding for @vscode/os-proxy-resolver on Windows x64",
+  "description": "Native binding for @vscode/os-proxy-resolver on Linux arm64 (musl)",
   "main": "os_proxy_resolver.node",
   "files": ["os_proxy_resolver.node", "LICENSE.txt", "ThirdPartyNotices.txt"],
-  "os": ["win32"],
-  "cpu": ["x64"],
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "libc": ["musl"],
   "publishConfig": { "access": "public" },
   "license": "MIT",
   "repository": "github:microsoft/os-proxy-resolver"

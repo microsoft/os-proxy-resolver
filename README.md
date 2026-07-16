@@ -247,18 +247,18 @@ Builds as both `rlib` and `cdylib`.
 ## Node.js package
 
 `@vscode/os-proxy-resolver` exposes the resolver through Node-API, with
-prebuilt addons for Windows and macOS x64/arm64 and glibc Linux
-x64/arm64/armhf. The public package selects a platform-specific optional
-dependency at runtime, so consumers install only the addon they need. Every
-Windows addon uses WinHTTP with no embedded PAC backend; macOS/Linux addons use
-the `pac-engine-wasm2c` backend. Consumers do not need Rust, a C compiler, or
-WABT installed.
+prebuilt addons for Windows and macOS x64/arm64, glibc Linux x64/arm64/armhf,
+and musl Linux x64/arm64. The public package selects a platform-, architecture-,
+and libc-specific optional dependency at runtime, so consumers install only the
+addon they need. Every Windows addon uses WinHTTP with no embedded PAC backend;
+macOS/Linux addons use the `pac-engine-wasm2c` backend. Consumers do not need
+Rust, a C compiler, or WABT installed.
 
-Linux addons are built with the pinned glibc 2.28 sysroots from the shared
+GNU Linux addons are built with the pinned glibc 2.28 sysroots from the shared
 `vscode-engineering` npm pipeline and then inspected with that toolchain's
 `objdump`; publishing fails if any final `.node` artifact requires a GLIBC
 symbol newer than 2.28. This keeps them compatible with VS Code's glibc 2.28
-desktop baseline.
+desktop baseline. Musl addons are cross-compiled in pinned `cross` containers.
 
 ```js
 const {
@@ -282,7 +282,7 @@ versions.
 
 The Azure Pipeline in [`azure-pipelines/publish.yml`](azure-pipelines/publish.yml)
 uses the shared `vscode-engineering` npm-package template. It publishes all
-seven native packages before the facade, with independent switches for npm
+nine native packages before the facade, with independent switches for npm
 and the VS Code Azure Artifacts feed. Keep the version in the root and all
 platform `package.json` files identical; `npm run verify:packages` checks this.
 
@@ -290,17 +290,19 @@ platform `package.json` files identical; `npm run verify:packages` checks this.
 
 GitHub Actions builds and tests **every PAC backend on every platform it
 supports**: native + Wasmtime + wasm2c on Windows x64 + arm64, macOS x64 +
-arm64, and Linux x86_64 + aarch64; native + wasm2c on Linux armv7 (which
-Cranelift can't AOT-compile for — wasm2c is what makes the sandbox reachable
-there; `cross` supplies the C toolchain and the containerized `wasm2c`). The
+arm64, and GNU/musl Linux x86_64 + aarch64; native + wasm2c on Linux armv7
+(which Cranelift can't AOT-compile for — wasm2c is what makes the sandbox
+reachable there; `cross` supplies the C toolchain and the containerized
+`wasm2c`). The
 shipped `proxytester` artifact uses the Wasmtime backend everywhere except
 armv7, which uses wasm2c. A variants job builds the single-backend
 configurations (WinHTTP fallback on Windows, native-only, Wasmtime-only,
 wasm2c-only), and another job asserts that building with no backend off
-Windows is a compile error. Benchmark jobs run on **Windows, macOS, Linux, and
-Linux armv7 (qemu)**: `pac_bench` times every embedded engine available on that
-OS (native + Wasmtime AOT + wasm2c + Wasmtime JIT on the desktop OSes; native +
-wasm2c on armv7), cross-checks them, and reports **single-backend binary sizes**
+Windows is a compile error. Benchmark jobs run on **Windows, macOS, GNU/musl
+Linux x64/arm64, and Linux armv7 (qemu)**: `pac_bench` times every embedded
+engine available on that target (native + Wasmtime AOT + wasm2c + Wasmtime JIT
+on 64-bit targets; native + wasm2c on armv7), cross-checks them, and reports
+**single-backend binary sizes**
 (one release build per backend with only that backend compiled in — the
 realistic deployment shape). The backend-less Windows variant times WinHTTP,
 and [`bench/electron`](bench/electron) times Chromium's own V8 PAC resolver
