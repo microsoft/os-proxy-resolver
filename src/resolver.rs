@@ -29,7 +29,7 @@ const ASYNC_RESOLUTION_QUEUE_CAPACITY: usize = 256;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ResolverOptions {
-    /// Hard timeout for a single `FindProxyForURL` call (macOS/Linux PAC).
+    /// Hard timeout for a single embedded `FindProxyForURL` call.
     pub pac_timeout: Duration,
     /// Timeout for fetching an explicitly configured PAC script.
     pub pac_fetch_timeout: Duration,
@@ -56,11 +56,11 @@ pub struct ResolverOptions {
     pub resolution_ttl: Duration,
     /// Maximum number of completed per-URL proxy decisions to retain.
     pub resolution_cache_capacity: usize,
-    /// Which embedded engine evaluates PAC scripts (macOS/Linux resolution,
+    /// Which embedded engine evaluates PAC scripts (normal resolution,
     /// [`ProxyResolver::evaluate_pac`], and the non-WinHTTP paths of
     /// [`ProxyResolver::evaluate_pac_source`]). The default is the sandboxed
     /// WebAssembly engine ([`PacBackendKind::Wasmtime`], which requires the
-    /// `pac-engine-wasmtime` feature, enabled by default);
+    /// `pac-engine-wasmtime` feature);
     /// [`PacBackendKind::Native`] selects the in-process native engine.
     pub pac_backend: PacBackendKind,
 }
@@ -111,9 +111,21 @@ struct Inner {
         feature = "pac-engine-wasm2c"
     ))]
     pac: OnceLock<crate::pac::PacEvaluator>,
-    #[cfg(not(windows))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     pac_cache: Mutex<Option<PacScriptCache>>,
-    #[cfg(not(windows))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     wpad_cache: Mutex<Option<WpadCache>>,
     #[cfg(any(
         not(windows),
@@ -123,7 +135,15 @@ struct Inner {
         feature = "pac-engine-wasm2c"
     ))]
     my_ip: Mutex<Option<(Instant, Option<String>)>>,
-    #[cfg(windows)]
+    #[cfg(all(
+        windows,
+        not(any(
+            feature = "pac-engine",
+            feature = "pac-engine-wasmtime",
+            feature = "pac-engine-wasmtime-jit",
+            feature = "pac-engine-wasm2c"
+        ))
+    ))]
     winhttp: OnceLock<Option<platform::WinHttpResolver>>,
     #[cfg(feature = "tokio")]
     async_worker: OnceLock<std::result::Result<AsyncResolverWorker, String>>,
@@ -145,7 +165,13 @@ struct ResolutionCacheEntry {
     proxies: Vec<ProxyKind>,
 }
 
-#[cfg(not(windows))]
+#[cfg(any(
+    not(windows),
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+))]
 struct PacScriptCache {
     source: String,
     generation: u64,
@@ -154,7 +180,13 @@ struct PacScriptCache {
     script: Option<Arc<str>>,
 }
 
-#[cfg(not(windows))]
+#[cfg(any(
+    not(windows),
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+))]
 struct WpadCache {
     generation: u64,
     at: Instant,
@@ -369,9 +401,21 @@ impl ProxyResolver {
                     feature = "pac-engine-wasm2c"
                 ))]
                 pac: OnceLock::new(),
-                #[cfg(not(windows))]
+                #[cfg(any(
+                    not(windows),
+                    feature = "pac-engine",
+                    feature = "pac-engine-wasmtime",
+                    feature = "pac-engine-wasmtime-jit",
+                    feature = "pac-engine-wasm2c"
+                ))]
                 pac_cache: Mutex::new(None),
-                #[cfg(not(windows))]
+                #[cfg(any(
+                    not(windows),
+                    feature = "pac-engine",
+                    feature = "pac-engine-wasmtime",
+                    feature = "pac-engine-wasmtime-jit",
+                    feature = "pac-engine-wasm2c"
+                ))]
                 wpad_cache: Mutex::new(None),
                 #[cfg(any(
                     not(windows),
@@ -381,7 +425,15 @@ impl ProxyResolver {
                     feature = "pac-engine-wasm2c"
                 ))]
                 my_ip: Mutex::new(None),
-                #[cfg(windows)]
+                #[cfg(all(
+                    windows,
+                    not(any(
+                        feature = "pac-engine",
+                        feature = "pac-engine-wasmtime",
+                        feature = "pac-engine-wasmtime-jit",
+                        feature = "pac-engine-wasm2c"
+                    ))
+                ))]
                 winhttp: OnceLock::new(),
                 #[cfg(feature = "tokio")]
                 async_worker: OnceLock::new(),
@@ -531,12 +583,16 @@ impl ProxyResolver {
     /// Evaluate an explicit PAC source against `url`, bypassing OS config.
     ///
     /// `source` may be a local filesystem path, a `file://` URL, or an
-    /// `http(s)://` URL. Off Windows the script is read (or fetched) and run on
-    /// the built-in engine. On Windows evaluation is delegated to WinHTTP,
-    /// which only loads PAC over `http(s)`; a local path / `file://` URL is
-    /// therefore rejected there (serve it over http instead — the `proxytester`
-    /// example does this for you).
-    #[cfg(not(windows))]
+    /// `http(s)://` URL. The script is read (or fetched) and run on the
+    /// selected embedded backend. A backend-less Windows build instead
+    /// delegates evaluation to WinHTTP, which only loads PAC over `http(s)`.
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     pub fn evaluate_pac_source(&self, source: &str, url: &Url) -> Result<Vec<ProxyKind>> {
         let pac_url = pac_source_to_url(source)?;
         let script =
@@ -544,9 +600,17 @@ impl ProxyResolver {
         self.evaluate_pac(&script, url)
     }
 
-    /// See the non-Windows variant. WinHTTP performs the evaluation and only
-    /// accepts `http(s)` PAC URLs.
-    #[cfg(windows)]
+    /// See the embedded-backend variant. WinHTTP performs the evaluation and
+    /// only accepts `http(s)` PAC URLs.
+    #[cfg(all(
+        windows,
+        not(any(
+            feature = "pac-engine",
+            feature = "pac-engine-wasmtime",
+            feature = "pac-engine-wasmtime-jit",
+            feature = "pac-engine-wasm2c"
+        ))
+    ))]
     pub fn evaluate_pac_source(&self, source: &str, url: &Url) -> Result<Vec<ProxyKind>> {
         if url.host_str().is_none() {
             return Err(Error::InvalidUrl(url.to_string()));
@@ -568,7 +632,15 @@ impl ProxyResolver {
     // -- internals ---------------------------------------------------------
 
     /// The lazily-created WinHTTP session used for PAC/WPAD resolution.
-    #[cfg(windows)]
+    #[cfg(all(
+        windows,
+        not(any(
+            feature = "pac-engine",
+            feature = "pac-engine-wasmtime",
+            feature = "pac-engine-wasmtime-jit",
+            feature = "pac-engine-wasm2c"
+        ))
+    ))]
     fn winhttp(&self) -> Option<&platform::WinHttpResolver> {
         self.inner
             .winhttp
@@ -714,7 +786,13 @@ impl ProxyResolver {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     fn resolve_from_os(&self, config: &OsProxyConfig, url: &Url) -> Vec<ProxyKind> {
         if config.auto_detect {
             if let Some(list) = self.try_wpad(url) {
@@ -729,7 +807,15 @@ impl ProxyResolver {
         self.static_or_direct(config, url)
     }
 
-    #[cfg(windows)]
+    #[cfg(all(
+        windows,
+        not(any(
+            feature = "pac-engine",
+            feature = "pac-engine-wasmtime",
+            feature = "pac-engine-wasmtime-jit",
+            feature = "pac-engine-wasm2c"
+        ))
+    ))]
     fn resolve_from_os(&self, config: &OsProxyConfig, url: &Url) -> Vec<ProxyKind> {
         if config.auto_detect || config.pac_url.is_some() {
             if let Some(winhttp) = self.winhttp() {
@@ -776,7 +862,13 @@ impl ProxyResolver {
     /// Evaluate a PAC script for resolution; `None` means "PAC layer
     /// unavailable, fall through". An explicit DIRECT (or unparseable result
     /// text) is `Some([Direct])`.
-    #[cfg(not(windows))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     fn eval_for_resolution(&self, script: &Arc<str>, url: &Url) -> Option<Vec<ProxyKind>> {
         match self.pac_evaluator().find_proxy(script, url, self.my_ip()) {
             Ok(list) if list.is_empty() => Some(vec![ProxyKind::Direct]),
@@ -788,7 +880,13 @@ impl ProxyResolver {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     fn try_pac_url(&self, pac_url: &str, url: &Url) -> Option<Vec<ProxyKind>> {
         let generation = self.inner.notifier.generation();
         let script = {
@@ -822,7 +920,13 @@ impl ProxyResolver {
         self.eval_for_resolution(&script, url)
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     fn try_wpad(&self, url: &Url) -> Option<Vec<ProxyKind>> {
         let generation = self.inner.notifier.generation();
         let script = {
@@ -1195,7 +1299,13 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
     #[test]
     fn evaluate_pac_public_api() {
         let r = ProxyResolver::with_env(pac_test_options(), env(&[]));
@@ -1208,9 +1318,8 @@ mod tests {
         assert_eq!(got, vec![ProxyKind::Http("p:1".into()), ProxyKind::Direct]);
     }
 
-    // Serves a PAC over http and evaluates it via the public API. Exercises the
-    // real engine on every platform (the built-in QuickJS engine off Windows,
-    // WinHTTP on it), which is also the path the `proxytester` example drives.
+    // Serves a PAC over http and evaluates it via the public API, which is also
+    // the path the `proxytester` example drives.
     #[test]
     fn evaluate_pac_source_over_http() {
         use std::io::{Read, Write};

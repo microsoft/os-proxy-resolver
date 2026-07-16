@@ -39,16 +39,16 @@
 //!
 //! | | config source | PAC/WPAD engine | change signal |
 //! |---|---|---|---|
-//! | Windows | `WinHttpGetIEProxyConfigForCurrentUser` | WinHTTP (`WinHttpGetProxyForUrl`, incl. DHCP+DNS WPAD) | registry notification |
+//! | Windows | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DNS WPAD; WinHTTP fallback with no backend | registry notification |
 //! | macOS | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
 //! | Linux | GNOME `org.gnome.system.proxy` (gsettings) | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
 //!
-//! On Windows no JS engine is built or linked — normal PAC evaluation and
-//! WPAD resolution are WinHTTP's. Configuration inspection uses the shared
-//! DNS WPAD discovery path so it can return the discovered script and URL;
-//! DHCP option 252 remains WinHTTP-only. On macOS/Linux, DHCP-based WPAD is a
-//! documented non-goal; DNS-based WPAD walks `wpad.<search-domain>` with tight
-//! timeouts.
+//! On Windows, WinHTTP always reads Internet Settings. When an embedded PAC
+//! backend is compiled in, normal resolution uses that backend and shared DNS
+//! WPAD discovery. A backend-less Windows build instead delegates PAC and WPAD
+//! resolution to WinHTTP, including DHCP option 252. DHCP-based WPAD is not
+//! available with an embedded backend or on macOS/Linux; DNS-based WPAD walks
+//! `wpad.<search-domain>` with tight timeouts.
 //!
 //! # The PAC cage
 //!
@@ -62,7 +62,7 @@
 //! queueing. The worker protocol is process-agnostic so the evaluator can
 //! later move out-of-process entirely (Chromium-style sandboxing).
 //!
-//! With the `pac-engine-wasmtime` feature (enabled by default, any platform),
+//! With the `pac-engine-wasmtime` feature (available on any platform),
 //! the cage gains a wall: [`ResolverOptions::pac_backend`] selects
 //! [`PacBackendKind::Wasmtime`] by default, which runs the same QuickJS-NG
 //! compiled to WebAssembly inside a Wasmtime sandbox (ahead-of-time compiled
@@ -112,8 +112,7 @@ mod types;
 mod wpad;
 
 // Off Windows there is no OS PAC evaluator, so at least one embedded backend
-// must be selected. On Windows WinHTTP handles PAC, so a backend-less build is
-// fine there.
+// must be selected. On Windows a backend-less build falls back to WinHTTP.
 #[cfg(all(
     not(windows),
     not(feature = "pac-engine"),
@@ -124,8 +123,7 @@ mod wpad;
 compile_error!(
     "No PAC backend selected. On non-Windows platforms enable at least one of the \
      `pac-engine` (native QuickJS), `pac-engine-wasmtime` (sandboxed Wasmtime) or \
-     `pac-engine-wasm2c` (sandboxed portable C) features. The default feature set \
-     enables `pac-engine-wasmtime`."
+    `pac-engine-wasm2c` (sandboxed portable C) features."
 );
 
 pub use notify::Subscription;

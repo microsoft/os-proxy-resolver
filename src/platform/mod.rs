@@ -26,7 +26,15 @@ mod imp;
 #[path = "windows.rs"]
 mod imp;
 
-#[cfg(windows)]
+#[cfg(all(
+    windows,
+    not(any(
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))
+))]
 pub(crate) use imp::WinHttpResolver;
 pub(crate) use imp::{read_config, spawn_watcher, Watcher};
 

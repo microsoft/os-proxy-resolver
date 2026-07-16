@@ -14,8 +14,9 @@
 //!
 //! With `--pac-script`, the given PAC file is evaluated instead of the OS
 //! configuration. It may be a local path, a `file://` URL, or an `http(s)://`
-//! URL. On Windows PAC evaluation is WinHTTP's, and WinHTTP only loads PAC over
-//! http(s), so a local file is served from an ephemeral `127.0.0.1` URL.
+//! URL. A backend-less Windows build uses WinHTTP, which only loads PAC over
+//! http(s), so in that configuration a local file is served from an ephemeral
+//! `127.0.0.1` URL.
 
 use os_proxy_resolver::ProxyResolver;
 
@@ -47,8 +48,8 @@ fn main() {
     }
 
     let resolver = ProxyResolver::new();
-    // Resolve the PAC override to something the library can load on this
-    // platform (on Windows this may spin up a localhost server for a file).
+    // Resolve the PAC override to something the library can load. A
+    // backend-less Windows build may spin up a localhost server for a file.
     let source = pac_script.as_deref().map(effective_pac_source);
 
     let mut failed = false;
@@ -98,17 +99,31 @@ fn usage_error(msg: &str) -> ! {
     std::process::exit(2);
 }
 
-/// Off Windows the library loads local paths, `file://`, and `http(s)` PAC
-/// sources directly, so the value passes through unchanged.
-#[cfg(not(windows))]
+/// Embedded backends load local paths, `file://`, and `http(s)` PAC sources
+/// directly, so the value passes through unchanged.
+#[cfg(any(
+    not(windows),
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+))]
 fn effective_pac_source(source: &str) -> String {
     source.to_string()
 }
 
-/// On Windows WinHTTP only loads PAC over http(s). An `http(s)` source passes
-/// through; a local path / `file://` URL is served from an ephemeral
-/// `127.0.0.1` URL backed by a detached thread that lives for the process.
-#[cfg(windows)]
+/// In a backend-less Windows build WinHTTP only loads PAC over http(s). An
+/// `http(s)` source passes through; a local path / `file://` URL is served from
+/// an ephemeral `127.0.0.1` URL backed by a detached process-lifetime thread.
+#[cfg(all(
+    windows,
+    not(any(
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))
+))]
 fn effective_pac_source(source: &str) -> String {
     use std::io::{Read, Write};
     use std::net::TcpListener;

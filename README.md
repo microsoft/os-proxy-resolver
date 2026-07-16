@@ -33,8 +33,9 @@ let proxies = os_proxy_resolver::resolve_proxy_async(&url).await?;
 
 ![Architecture overview](docs/architecture.svg)
 
-The diagram shows the sandboxed Wasmtime backend, which is the default. The PAC
-backend is selected explicitly at build time — see [PAC backends](#pac-backends).
+The diagram shows the sandboxed Wasmtime backend. PAC backends are selected
+explicitly at build time — see [PAC backends](#pac-backends). Windows defaults
+to its native WinHTTP resolver with no embedded PAC backend.
 
 ## Resolution precedence
 
@@ -52,23 +53,22 @@ resolution.
 
 | | config source | PAC + WPAD | change signal |
 |---|---|---|---|
-| **Windows** | `WinHttpGetIEProxyConfigForCurrentUser` | WinHTTP `WinHttpGetProxyForUrl` (PAC eval + DHCP/DNS WPAD in the OS) | registry change notification |
+| **Windows** | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DNS WPAD; WinHTTP fallback when backend-less | registry change notification |
 | **macOS** | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
 | **Linux** | GNOME `org.gnome.system.proxy` via `gsettings` | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
 
 ### PAC backends
 
-Off Windows (and, if you opt in, on Windows) PAC scripts run on an embedded
-engine, selected explicitly via Cargo features:
+PAC scripts run on an embedded engine selected explicitly via Cargo features:
 
 - **`pac-engine`** — native QuickJS-NG, compiled from C via the MIT-licensed
   `rquickjs-sys` crate (needs a C compiler; no autotools/make, so
   cross-compilation stays clean). Works on every target, including 32-bit
   armv7.
 - **`pac-engine-wasmtime`** — the same QuickJS-NG compiled to wasm32-wasip1
-  (see [`pac-wasm-guest/`](pac-wasm-guest)) and run under Wasmtime. Pure Rust
-  to build (no C compiler), but can't target platforms Cranelift can't
-  AOT-compile for, such as armv7. **This is the default.**
+  (see [`pac-wasm-guest/`](pac-wasm-guest)) and run under Wasmtime. It does not
+  compile the native QuickJS C sources, but can't target platforms Cranelift
+  can't AOT-compile for, such as armv7.
 - **`pac-engine-wasm2c`** — the same wasm guest translated to portable C with
   WABT's [`wasm2c`](https://github.com/WebAssembly/wabt) at build time and
   compiled like any other C code: the wasm sandbox for every target a C
@@ -89,13 +89,15 @@ engine, selected explicitly via Cargo features:
 Enable at least one; the features are independent, and enabling several lets
 them be compared (the `pac_bench` benchmark does exactly that). Which one evaluates
 a script is chosen per resolver with `ResolverOptions::pac_backend`, defaulting
-to Wasmtime when it is compiled in (then native, then wasm2c). Off Windows a backend is **required** —
-building with neither is a compile error. On Windows WinHTTP handles PAC, so a
-backend-less build is valid and stays **pure Rust**. The PAC helper functions
-are first-party JavaScript implemented from the public PAC specification.
+to Wasmtime when it is compiled in (then native, then wasm2c). Off Windows a
+backend is **required** — building with neither is a compile error. A
+backend-less Windows build is valid and uses WinHTTP for PAC and WPAD
+resolution. The PAC helper functions are first-party JavaScript implemented
+from the public PAC specification.
 
-Non-goals: DHCP-based WPAD (option 252) on macOS/Linux (Windows gets it via
-WinHTTP), KDE proxy settings, proxy authentication credentials.
+Non-goals: DHCP-based WPAD (option 252) when using an embedded backend or on
+macOS/Linux, KDE proxy settings, proxy authentication credentials. A
+backend-less Windows build gets DHCP WPAD through WinHTTP.
 
 ## The PAC cage
 
@@ -129,9 +131,9 @@ QuickJS context is neither `Send` nor `Sync`, and its `dnsResolve()` /
   JIT/compiler at all, and only `Module::deserialize` of that trusted
   first-party artifact happens at runtime. Runaway scripts are stopped by
   epoch interruption; memory is capped both by QuickJS's own 64 MiB limit
-  inside the guest and a cap on the wasm linear memory. It is the default
-  backend (`default = ["pac-engine-wasmtime"]`) and the default `pac_backend`;
-  see [PAC backends](#pac-backends) for selecting it or the native engine.
+  inside the guest and a cap on the wasm linear memory. When compiled in, it is
+  the preferred `pac_backend`; see [PAC backends](#pac-backends) for selecting
+  it or the native engine.
 
 WPAD discovery is aggressive about not stalling: `wpad.<search-domain>` DNS
 probes get ~300ms each (walking up the domain, never into a TLD), the
@@ -188,8 +190,9 @@ included. If auto-detection is enabled, the call performs DNS WPAD discovery
 first; if no usable `wpad.dat` is found, it loads the configured PAC URL. PAC
 loading is best-effort and synchronous, using the timeouts in `ResolverOptions`.
 The returned script includes its configured or discovered URL and is never
-evaluated. Windows DNS WPAD uses adapter DNS suffixes; DHCP option 252 remains
-part of WinHTTP URL resolution only and is not queried by this inspection API.
+evaluated. Windows DNS WPAD uses adapter DNS suffixes. DHCP option 252 is only
+available for URL resolution in a backend-less Windows build through WinHTTP;
+it is not queried by this inspection API.
 
 ## Bad-proxy feedback
 
@@ -207,14 +210,15 @@ is returned and retried.
 
 ```sh
 git clone <repo>
-cargo build                                                # default: sandboxed Wasmtime backend (pure Rust, no C compiler)
+cargo build                                                # Windows: native WinHTTP PAC/WPAD
+cargo build --features pac-engine-wasmtime                 # macOS/Linux: sandboxed Wasmtime backend
 cargo build --no-default-features --features pac-engine    # native QuickJS backend (needs a C compiler)
 cargo build --no-default-features --features pac-engine-wasm2c  # portable sandbox (needs C compiler + pinned wasm2c)
-cargo test
+cargo test --features pac-engine-wasmtime
 ```
 
 (Off Windows, `cargo build --no-default-features` with no backend feature is a
-compile error; on Windows it is a valid pure-Rust WinHTTP-only build.)
+compile error; on Windows it is a valid WinHTTP PAC/WPAD fallback build.)
 
 Examples:
 
@@ -224,17 +228,19 @@ cargo run --example resolve -- --watch                # watch for changes
 cargo run --example proxytester -- --pac-script file.pac http://url/ # test a PAC file
 ```
 
-To compare the PAC engines head-to-head — WinHTTP (Windows), the embedded
-native QuickJS engine, and the two sandboxed engines — on the same script
-and URLs, run the `pac_bench` example with the engine features enabled:
+On macOS/Linux, add `--features pac-engine-wasmtime` (or another backend) to
+the example commands. Windows uses WinHTTP when no backend feature is given.
+
+To compare the embedded PAC engines head-to-head on the same script and URLs,
+run the `pac_bench` example with the engine features enabled:
 
 ```sh
 cargo run --release --example pac_bench --features "pac-engine pac-engine-wasmtime pac-engine-wasm2c"
 ```
 
-The benchmark cross-checks all engines and fails if the embedded backends
-(byte-identical engine sources) disagree on any URL; it also reports the size
-of the embedded AOT-compiled guest module.
+The benchmark fails if the embedded backends (byte-identical engine sources)
+disagree on any URL; it also reports the size of the embedded AOT-compiled
+guest module. A backend-less Windows build can separately benchmark WinHTTP.
 
 Builds as both `rlib` and `cdylib`.
 
@@ -244,8 +250,9 @@ Builds as both `rlib` and `cdylib`.
 prebuilt addons for Windows and macOS x64/arm64 and glibc Linux
 x64/arm64/armhf. The public package selects a platform-specific optional
 dependency at runtime, so consumers install only the addon they need. Every
-addon uses the `pac-engine-wasm2c` backend; consumers do not need Rust, a C
-compiler, or WABT installed.
+Windows addon uses WinHTTP with no embedded PAC backend; macOS/Linux addons use
+the `pac-engine-wasm2c` backend. Consumers do not need Rust, a C compiler, or
+WABT installed.
 
 Linux addons are built with the pinned glibc 2.28 sysroots from the shared
 `vscode-engineering` npm pipeline and then inspected with that toolchain's
@@ -288,16 +295,16 @@ Cranelift can't AOT-compile for — wasm2c is what makes the sandbox reachable
 there; `cross` supplies the C toolchain and the containerized `wasm2c`). The
 shipped `proxytester` artifact uses the Wasmtime backend everywhere except
 armv7, which uses wasm2c. A variants job builds the single-backend
-configurations (WinHTTP-only pure-Rust Windows, native-only, Wasmtime-only,
+configurations (WinHTTP fallback on Windows, native-only, Wasmtime-only,
 wasm2c-only), and another job asserts that building with no backend off
 Windows is a compile error. Benchmark jobs run on **Windows, macOS, Linux, and
-Linux armv7 (qemu)**: `pac_bench` times every engine available on that OS
-(WinHTTP + native + Wasmtime AOT + wasm2c + Wasmtime JIT on the desktop OSes;
-native + wasm2c on armv7), cross-checks them, and reports **single-backend
-binary sizes** (one release build per backend with only that backend compiled
-in — the realistic deployment shape), and [`bench/electron`](bench/electron)
-times Chromium's own V8 PAC resolver (what Electron uses by default) as the
-baseline next to the in-process numbers.
+Linux armv7 (qemu)**: `pac_bench` times every embedded engine available on that
+OS (native + Wasmtime AOT + wasm2c + Wasmtime JIT on the desktop OSes; native +
+wasm2c on armv7), cross-checks them, and reports **single-backend binary sizes**
+(one release build per backend with only that backend compiled in — the
+realistic deployment shape). The backend-less Windows variant times WinHTTP,
+and [`bench/electron`](bench/electron) times Chromium's own V8 PAC resolver
+(what Electron uses by default) as the baseline next to the in-process numbers.
 
 ## License
 
@@ -306,14 +313,14 @@ Copyright (c) Microsoft Corporation.
 
 The native PAC engine (`pac-engine`) embeds QuickJS-NG (MIT) via the
 MIT-licensed `rquickjs-sys` crate, statically linked into the compiled library.
-The sandboxed backend (`pac-engine-wasmtime`, the default) additionally embeds
+The sandboxed backend (`pac-engine-wasmtime`) additionally embeds
 the Apache-2.0 (with LLVM exception) licensed Wasmtime runtime and a wasm build
 of QuickJS-NG (via the Apache-2.0-licensed Javy crate). The portable sandboxed
 backend (`pac-engine-wasm2c`) compiles C generated by WABT's `wasm2c` from that
 same wasm build, together with WABT's Apache-2.0-licensed `wasm-rt` runtime
 sources (vendored under `pac-wasm-guest/wasm-rt/`). The PAC helper functions
 are first-party JavaScript implemented from the public PAC specification.
-Everything is permissively licensed. A `--no-default-features` Windows build
-contains no JavaScript engine at all (WinHTTP handles PAC).
+Everything is permissively licensed. A default Windows build contains no
+JavaScript engine at all (WinHTTP handles PAC).
 
 [QuickJS]: https://github.com/quickjs-ng/quickjs

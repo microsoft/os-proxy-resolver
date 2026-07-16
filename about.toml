@@ -1,7 +1,7 @@
 # cargo-about configuration.
 #
 # Regenerate the third-party notices with:
-#   cargo about generate about.hbs > ThirdPartyNotices.txt
+#   cargo about generate --all-features about.hbs > ThirdPartyNotices.txt
 #
 # The template embeds the hand-written PAC-engine and QuickJS-NG sections
 # (which describe vendored C sources cargo-about can't see into) and then

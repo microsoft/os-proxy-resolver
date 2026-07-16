@@ -3,11 +3,12 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! PAC / wpad.dat fetching. Small, sync, with tight timeouts and a size cap: a
-//! PAC URL can point anywhere, including at something hostile or unresponsive.
+//! PAC / wpad.dat fetching. HTTP uses WinHTTP/Schannel on Windows and
+//! ureq/rustls with OS trust-store roots elsewhere; both feed the same
+//! size-limited UTF-8 reader. The PAC URL can point anywhere, including at
+//! something hostile or unresponsive.
 
 use crate::types::{Error, Result};
-#[cfg(not(windows))]
 use std::io::Read;
 use std::time::Duration;
 
@@ -20,15 +21,31 @@ pub(crate) fn fetch_pac(pac_url: &str, timeout: Duration) -> Result<String> {
             .ok()
             .and_then(|u| u.to_file_path().ok())
             .unwrap_or_else(|| std::path::PathBuf::from(rest));
-        return std::fs::read_to_string(&path)
-            .map_err(|e| Error::PacFetch(format!("{}: {e}", path.display())));
+        let file = std::fs::File::open(&path)
+            .map_err(|e| Error::PacFetch(format!("{}: {e}", path.display())))?;
+        return read_pac(file, &path.display().to_string());
     }
 
-    fetch_http(pac_url, timeout)
+    read_pac(fetch_http(pac_url, timeout)?, pac_url)
+}
+
+fn read_pac(mut reader: impl Read, source: &str) -> Result<String> {
+    let mut body = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_PAC_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|e| Error::PacFetch(format!("{source}: read: {e}")))?;
+    if body.len() as u64 > MAX_PAC_BYTES {
+        return Err(Error::PacFetch(format!(
+            "{source}: PAC script exceeds 1 MiB"
+        )));
+    }
+    String::from_utf8(body).map_err(|e| Error::PacFetch(format!("{source}: {e}")))
 }
 
 #[cfg(not(windows))]
-fn fetch_http(pac_url: &str, timeout: Duration) -> Result<String> {
+fn fetch_http(pac_url: &str, timeout: Duration) -> Result<impl Read> {
     let agent = ureq::AgentBuilder::new()
         .timeout(timeout)
         .redirects(4)
@@ -38,22 +55,11 @@ fn fetch_http(pac_url: &str, timeout: Duration) -> Result<String> {
         .get(pac_url)
         .call()
         .map_err(|e| Error::PacFetch(format!("{pac_url}: {e}")))?;
-    let mut body = String::new();
-    response
-        .into_reader()
-        .take(MAX_PAC_BYTES + 1)
-        .read_to_string(&mut body)
-        .map_err(|e| Error::PacFetch(format!("{pac_url}: read: {e}")))?;
-    if body.len() as u64 > MAX_PAC_BYTES {
-        return Err(Error::PacFetch(format!(
-            "{pac_url}: PAC script exceeds 1 MiB"
-        )));
-    }
-    Ok(body)
+    Ok(response.into_reader())
 }
 
 #[cfg(windows)]
-fn fetch_http(pac_url: &str, timeout: Duration) -> Result<String> {
+fn fetch_http(pac_url: &str, timeout: Duration) -> Result<impl Read> {
     use windows_sys::Win32::Foundation::GetLastError;
     use windows_sys::Win32::Networking::WinHttp::{
         WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
@@ -68,6 +74,33 @@ fn fetch_http(pac_url: &str, timeout: Duration) -> Result<String> {
             if !self.0.is_null() {
                 unsafe { WinHttpCloseHandle(self.0) };
             }
+        }
+    }
+
+    struct Response {
+        _session: Handle,
+        _connection: Handle,
+        request: Handle,
+    }
+
+    impl Read for Response {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let mut read = 0u32;
+            let buffer_len = buffer.len().min(u32::MAX as usize) as u32;
+            if unsafe {
+                WinHttpReadData(
+                    self.request.0,
+                    buffer.as_mut_ptr().cast(),
+                    buffer_len,
+                    &mut read,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::from_raw_os_error(
+                    unsafe { GetLastError() } as i32
+                ));
+            }
+            Ok(read as usize)
         }
     }
 
@@ -165,35 +198,11 @@ fn fetch_http(pac_url: &str, timeout: Duration) -> Result<String> {
         return Err(Error::PacFetch(format!("{pac_url}: HTTP status {status}")));
     }
 
-    let mut body = Vec::new();
-    loop {
-        let mut chunk = [0u8; 16 * 1024];
-        let mut read = 0u32;
-        if unsafe {
-            WinHttpReadData(
-                request.0,
-                chunk.as_mut_ptr().cast(),
-                chunk.len() as u32,
-                &mut read,
-            )
-        } == 0
-        {
-            return Err(Error::PacFetch(format!(
-                "{pac_url}: read failed: {}",
-                unsafe { GetLastError() }
-            )));
-        }
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..read as usize]);
-        if body.len() as u64 > MAX_PAC_BYTES {
-            return Err(Error::PacFetch(format!(
-                "{pac_url}: PAC script exceeds 1 MiB"
-            )));
-        }
-    }
-    String::from_utf8(body).map_err(|error| Error::PacFetch(format!("{pac_url}: {error}")))
+    Ok(Response {
+        _session: session,
+        _connection: connection,
+        request,
+    })
 }
 
 #[cfg(test)]
@@ -214,5 +223,18 @@ mod tests {
     #[test]
     fn missing_file_is_an_error() {
         assert!(fetch_pac("file:///nonexistent/x.pac", Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_pac_from_any_transport() {
+        let body = vec![b'a'; MAX_PAC_BYTES as usize + 1];
+        let error = read_pac(body.as_slice(), "test").unwrap_err();
+        assert!(error.to_string().contains("exceeds 1 MiB"));
+    }
+
+    #[test]
+    fn rejects_non_utf8_pac_from_any_transport() {
+        let error = read_pac([0xff].as_slice(), "test").unwrap_err();
+        assert!(error.to_string().contains("invalid utf-8"));
     }
 }

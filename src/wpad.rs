@@ -3,11 +3,10 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! DNS-based WPAD discovery. Normal Windows URL resolution delegates WPAD,
-//! including DHCP option 252, to WinHTTP; this DNS-only implementation is used
-//! there by the configuration inspection API so it can return script content
-//! and the discovered URL. DHCP-based discovery is otherwise a documented
-//! non-goal here.
+//! DNS-based WPAD discovery. Windows uses this path when an embedded PAC
+//! backend is compiled in. A backend-less Windows build delegates WPAD,
+//! including DHCP option 252, to WinHTTP. DHCP-based discovery is otherwise a
+//! documented non-goal here.
 //!
 //! Strategy: take the DNS search domains from the OS resolver configuration
 //! (macOS `SCDynamicStore`, Linux `/etc/resolv.conf`), and for each, walk up

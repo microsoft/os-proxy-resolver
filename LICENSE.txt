@@ -22,7 +22,8 @@ SOFTWARE.
 
 ---
 
-The embedded PAC engine (in src/pac/engine) links the QuickJS-NG JavaScript
-engine on macOS and Linux via the MIT-licensed rquickjs-sys crate. QuickJS-NG
-is also MIT-licensed. See ThirdPartyNotices.txt for details. The MIT license
-above applies to the first-party source of this project.
+The optional native PAC backend (in src/pac/engine) links the QuickJS-NG
+JavaScript engine on every supported platform via the MIT-licensed
+rquickjs-sys crate. QuickJS-NG is also MIT-licensed. See
+ThirdPartyNotices.txt for details. The MIT license above applies to the
+first-party source of this project.

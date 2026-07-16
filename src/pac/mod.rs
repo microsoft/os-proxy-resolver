@@ -3,8 +3,8 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! The caged PAC evaluator (macOS/Linux only — Windows delegates PAC to
-//! WinHTTP).
+//! The caged PAC evaluator. Windows uses it whenever an embedded backend is
+//! compiled in; backend-less Windows builds delegate PAC to WinHTTP.
 //!
 //! Three interchangeable backends implement [`PacBackend`]:
 //!

@@ -23,7 +23,7 @@ jobs:
           # backend — wasm2c is what makes the sandbox reachable there). The
           # shipped proxytester artifact is a separate single-backend build:
           # Wasmtime everywhere, wasm2c on armv7 (`artifact_features`).
-          # Single-backend combinations (WinHTTP-only, native-only, ...) are
+          # Single-backend combinations (WinHTTP fallback, native-only, ...) are
           # additionally covered by the `pac-backend-variants` job below.
           #
           # The native engine needs a C toolchain for the QuickJS sources
@@ -31,7 +31,7 @@ jobs:
           # pinned `wasm2c` binary (installed below; the cross containers get
           # it via Cross.toml pre-build hooks).
 
-          # Windows (WinHTTP still handles normal resolution).
+          # Windows.
           - name: windows x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -159,7 +159,7 @@ jobs:
         run: ${{ matrix.use_cross && 'cross' || 'cargo' }} test --target ${{ matrix.target }} ${{ matrix.features }}
         shell: bash
 
-      - name: Build Node addon (wasm2c)
+      - name: Build Node addon
         if: ${{ !matrix.use_cross }}
         run: node npm/scripts/build-native.js ${{ matrix.target }}
         shell: bash
@@ -183,7 +183,7 @@ jobs:
           mkdir -p "$stage"
           # The PAC engine (Wasmtime + AOT guest; the wasm2c sandbox on armv7)
           # is statically linked into the binary, so proxytester is
-          # self-contained (WinHTTP handles normal resolution on Windows).
+          # self-contained.
           cp "target/${{ matrix.target }}/release/examples/proxytester${ext}" "$stage/"
         shell: bash
 
@@ -233,17 +233,21 @@ jobs:
       # These tests read the real OS proxy config after configuring it, so they
       # only run here (gated behind OS_PROXY_RESOLVER_OS_TESTS). On Linux the
       # whole thing runs under a private D-Bus session.
-      # These tests only exercise OS-config reading, not PAC, but the crate
-      # still needs a backend to compile on non-Windows. Use the default
-      # (Wasmtime) backend, which needs no C toolchain.
+      # These tests only exercise OS-config reading, not PAC. Non-Windows still
+      # needs an explicit backend to compile; Windows intentionally uses its
+      # backend-less WinHTTP default.
       - name: Run OS round-trip tests
         env:
           OS_PROXY_RESOLVER_OS_TESTS: "1"
         run: |
+          features="tokio"
+          if [ "${{ matrix.os }}" != "windows-latest" ]; then
+            features="tokio pac-engine-wasmtime"
+          fi
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            dbus-run-session -- cargo test --features tokio os_roundtrip -- --nocapture
+            dbus-run-session -- cargo test --features "$features" os_roundtrip -- --nocapture
           else
-            cargo test --features tokio os_roundtrip -- --nocapture
+            cargo test --features "$features" os_roundtrip -- --nocapture
           fi
         shell: bash
 
@@ -257,7 +261,8 @@ jobs:
           # Every engine available per OS is built and timed separately on the
           # same PAC script and URLs; their captured results are cross-checked
           # across processes:
-          #   windows      : WinHTTP + native QuickJS + Wasmtime AOT/JIT + wasm2c
+          #   windows      : native QuickJS + Wasmtime AOT/JIT + wasm2c;
+          #                  WinHTTP in a separate backend-less build
           #   macos/linux  : native QuickJS + Wasmtime AOT/JIT + wasm2c
           #   linux armv7  : native QuickJS + wasm2c (no Cranelift for 32-bit
           #                  ARM), built with `cross` and run under qemu — the
@@ -395,11 +400,13 @@ jobs:
           done
           echo "all embedded backends agree on all URLs"
 
-          # WinHTTP is part of every Windows binary regardless of embedded
-          # feature selection. Benchmark it once using the last artifact; it
-          # is intentionally excluded from the strict result diff because it
-          # may omit a trailing DIRECT fallback.
+          # WinHTTP resolution is only compiled when no embedded backend is
+          # selected. Build that variant separately; its results are excluded
+          # from the strict diff because WinHTTP may omit trailing DIRECT.
           if [ "$RUNNER_OS" = "Windows" ]; then
+            $CARGO build --release --example pac_bench $TARGET_FLAG \
+              --no-default-features --features tokio
+            printf '  %-26s: %s bytes\n' "winhttp" "$(wc -c < "$BIN" | tr -d ' ')"
             echo
             echo "pac_bench platform performance: winhttp"
             "$BIN" --backend winhttp --iterations ${{ matrix.iterations }}
@@ -421,19 +428,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # WinHTTP-only pure-Rust Windows build: no embedded engine at all.
-          # Valid on Windows because WinHTTP handles PAC.
-          - name: windows WinHTTP-only (pure Rust)
+          # Backend-less Windows build: WinHTTP handles PAC and WPAD.
+          - name: windows WinHTTP fallback
             os: windows-latest
             features: --no-default-features --features tokio
           # Native-only build (no wasm sandbox) on a 64-bit host.
           - name: linux native-only
             os: ubuntu-latest
             features: --no-default-features --features "tokio pac-engine"
-          # Wasmtime-only (the default feature set): no C toolchain use at all.
+          # Wasmtime-only: no native QuickJS.
           - name: linux wasmtime-only
             os: ubuntu-latest
-            features: --features tokio
+            features: --no-default-features --features "tokio pac-engine-wasmtime"
           # wasm2c-only: the sandbox without Wasmtime, as an armv7-style build
           # would use, but tested on a fast 64-bit host.
           - name: linux wasm2c-only
