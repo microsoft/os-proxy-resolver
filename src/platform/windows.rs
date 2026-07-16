@@ -3,9 +3,9 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! Windows: everything delegates to WinHTTP, which owns static config, PAC
-//! evaluation, and WPAD (both DHCP option 252 and DNS) natively — no vendored
-//! JS engine ships on this platform.
+//! Windows proxy configuration comes from WinHTTP. PAC evaluation and DNS WPAD
+//! use a compiled embedded backend when one is available; backend-less builds
+//! delegate both DNS and DHCP WPAD to WinHTTP.
 //!
 //! - `WinHttpGetIEProxyConfigForCurrentUser` -> static proxy string, PAC URL,
 //!   auto-detect flag.
@@ -16,23 +16,43 @@
 
 use super::{OsProxyConfig, StaticRules};
 use crate::bypass::BypassRules;
-use crate::types::{
-    with_default_port, Error, PlatformProxyConfig, ProxyKind, Result, WindowsProxyConfig,
-};
+use crate::types::{with_default_port, PlatformProxyConfig, ProxyKind, WindowsProxyConfig};
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
+use crate::types::{Error, Result};
 use std::ffi::c_void;
 use std::sync::Arc;
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
+use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, GlobalFree, ERROR_BUFFER_OVERFLOW, HANDLE, WAIT_OBJECT_0,
+    CloseHandle, GlobalFree, ERROR_BUFFER_OVERFLOW, HANDLE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
     GAA_FLAG_SKIP_UNICAST, IP_ADAPTER_ADDRESSES_LH,
 };
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
 use windows_sys::Win32::Networking::WinHttp::{
-    WinHttpCloseHandle, WinHttpGetIEProxyConfigForCurrentUser, WinHttpGetProxyForUrl, WinHttpOpen,
-    WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_AUTOPROXY_AUTO_DETECT, WINHTTP_AUTOPROXY_CONFIG_URL,
-    WINHTTP_AUTOPROXY_OPTIONS, WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_AUTO_DETECT_TYPE_DNS_A,
-    WINHTTP_CURRENT_USER_IE_PROXY_CONFIG, WINHTTP_PROXY_INFO,
+    WinHttpCloseHandle, WinHttpGetProxyForUrl, WinHttpOpen, WINHTTP_ACCESS_TYPE_NO_PROXY,
+    WINHTTP_AUTOPROXY_AUTO_DETECT, WINHTTP_AUTOPROXY_CONFIG_URL, WINHTTP_AUTOPROXY_OPTIONS,
+    WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_AUTO_DETECT_TYPE_DNS_A, WINHTTP_PROXY_INFO,
+};
+use windows_sys::Win32::Networking::WinHttp::{
+    WinHttpGetIEProxyConfigForCurrentUser, WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
 };
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 use windows_sys::Win32::System::Registry::{
@@ -43,6 +63,12 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, SetEvent, WaitForMultipleObjects, INFINITE,
 };
 
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
 const ERROR_WINHTTP_LOGIN_FAILURE: u32 = 12015;
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -216,6 +242,15 @@ fn parse_static_proxy(s: &str) -> StaticRules {
 /// WinHTTP already picked the entries; scheme-prefixed entries still need
 /// filtering. NOTE: WinHTTP drops trailing `DIRECT` entries from PAC results
 /// ("PROXY a; DIRECT" comes back as just "a") — a known WinHTTP limitation.
+#[cfg(any(
+    test,
+    not(any(
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))
+))]
 fn parse_winhttp_result_list(s: &str, url_scheme: &str) -> Vec<ProxyKind> {
     let mut out = Vec::new();
     for entry in s.split([';', ' ']) {
@@ -251,12 +286,36 @@ fn parse_winhttp_result_list(s: &str, url_scheme: &str) -> Vec<ProxyKind> {
 
 /// A WinHTTP session handle for `WinHttpGetProxyForUrl`. Session handles are
 /// thread-safe per WinHTTP docs.
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
 pub(crate) struct WinHttpResolver {
     session: HANDLE,
 }
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
 unsafe impl Send for WinHttpResolver {}
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
 unsafe impl Sync for WinHttpResolver {}
 
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
 impl WinHttpResolver {
     pub fn new() -> Result<Self> {
         let agent = to_wide("os-proxy-resolver");
@@ -349,6 +408,12 @@ impl WinHttpResolver {
     }
 }
 
+#[cfg(not(any(
+    feature = "pac-engine",
+    feature = "pac-engine-wasmtime",
+    feature = "pac-engine-wasmtime-jit",
+    feature = "pac-engine-wasm2c"
+)))]
 impl Drop for WinHttpResolver {
     fn drop(&mut self) {
         unsafe { WinHttpCloseHandle(self.session) };

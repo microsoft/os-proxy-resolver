@@ -6,12 +6,11 @@
 //! Benchmark every available PAC evaluation path against the others on the
 //! same PAC script and URLs:
 //!
-//! * **system** (Windows only) — [`ProxyResolver::evaluate_pac_source`], i.e.
-//!   WinHTTP (`WinHttpGetProxyForUrl`). Off Windows that API uses the same
-//!   embedded engine as `native`, so it is not timed separately there.
-//! * **native** — [`ProxyResolver::evaluate_pac`] with the default backend:
-//!   the in-process QuickJS-NG engine. Always built off Windows; on Windows
-//!   only with `--features pac-engine`.
+//! * **system** (backend-less Windows only) —
+//!   [`ProxyResolver::evaluate_pac_source`], i.e. WinHTTP
+//!   (`WinHttpGetProxyForUrl`).
+//! * **native** — [`ProxyResolver::evaluate_pac`] with the in-process
+//!   QuickJS-NG engine (`--features pac-engine`).
 //! * **wasmtime** — the same QuickJS-NG compiled to WebAssembly and run in a
 //!   Wasmtime sandbox (`--features pac-engine-wasmtime`, any platform
 //!   Cranelift can AOT-compile for), selected via
@@ -37,9 +36,8 @@
 //!     --iterations 5000 --pac-script my.pac https://a.example/ http://b.corp/
 //! ```
 //!
-//! On Windows the PAC script is additionally served from an ephemeral
-//! `127.0.0.1` HTTP endpoint (WinHTTP only loads PAC over http(s)); all
-//! engines still evaluate identical input.
+//! In a backend-less Windows build the PAC script is served from an ephemeral
+//! `127.0.0.1` HTTP endpoint because WinHTTP only loads PAC over http(s).
 
 #[cfg(any(
     feature = "pac-engine",
@@ -164,9 +162,16 @@ struct Backend {
 fn backends(script: &str) -> Vec<Backend> {
     let mut backends: Vec<Backend> = Vec::new();
 
-    // WinHTTP: only meaningful on Windows (off Windows evaluate_pac_source
-    // uses the same embedded engine as the `native` entry below).
-    #[cfg(windows)]
+    // WinHTTP is the system evaluator only in a backend-less Windows build.
+    #[cfg(all(
+        windows,
+        not(any(
+            feature = "pac-engine",
+            feature = "pac-engine-wasmtime",
+            feature = "pac-engine-wasmtime-jit",
+            feature = "pac-engine-wasm2c"
+        ))
+    ))]
     {
         let resolver = ProxyResolver::new();
         let pac_url = serve_pac(script.to_string());
@@ -575,7 +580,15 @@ fn fmt_ns(ns: u128) -> String {
 /// life of the process (WinHTTP only loads PAC over http(s)). Each connection
 /// is answered with the script and closed; the accept loop lives on a detached
 /// thread.
-#[cfg(windows)]
+#[cfg(all(
+    windows,
+    not(any(
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))
+))]
 fn serve_pac(script: String) -> String {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -611,8 +624,8 @@ fn print_usage() {
         "usage: pac_bench [--iterations N] [--pac-script <path>]\n\
          [--backend <name>] [--results-file <path>] [<url>...]\n\
          \n\
-         Times every compiled-in PAC path (WinHTTP on Windows, the native\n\
-         QuickJS engine, Wasmtime AOT/JIT, and wasm2c) on the same PAC script\n\
+         Times every compiled-in PAC path (WinHTTP on backend-less Windows,\n\
+         native QuickJS, Wasmtime AOT/JIT, and wasm2c) on the same PAC script\n\
          and URLs. `--backend` times one compiled-in path. With exactly one\n\
          selected backend, `--results-file` writes deterministic TSV rows for\n\
          cross-process result comparison."

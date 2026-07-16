@@ -7,7 +7,7 @@ rust-version = "1.77"
 # the MIT-licensed quickjs-ng via the `rquickjs-sys` crate; the PAC helper
 # functions are original, implemented from the public PAC specification.
 license = "MIT"
-description = "Resolve the OS-configured proxy (static, PAC, WPAD) for a URL, with change notification. WinHTTP on Windows; SystemConfiguration/gsettings + an embedded QuickJS PAC engine on macOS/Linux."
+description = "Resolve the OS-configured proxy (static, PAC, WPAD) for a URL, with change notification and a sandboxed PAC engine."
 repository = "https://github.com/microsoft/os-proxy-resolver"
 keywords = ["proxy", "pac", "wpad", "winhttp", "system-proxy"]
 categories = ["network-programming", "os"]
@@ -17,18 +17,16 @@ crate-type = ["rlib", "cdylib"]
 
 [features]
 # PAC backend selection is explicit: enable at least one of `pac-engine`
-# (native QuickJS) and/or `pac-engine-wasmtime` (sandboxed). On non-Windows a
-# backend is required (there is no OS PAC evaluator) — building with neither is
-# a compile error; on Windows WinHTTP always handles PAC, so a backend-less
-# build is valid there. The default set enables the sandboxed Wasmtime backend
-# on every platform, which is also the default runtime `pac_backend`.
-default = ["pac-engine-wasmtime"]
+# (native QuickJS), `pac-engine-wasmtime` (sandboxed), or the other backends
+# below. On non-Windows a backend is required (there is no OS PAC evaluator),
+# so building with no features is a compile error. On Windows the default
+# backend-less build delegates PAC/WPAD resolution to WinHTTP.
+default = []
 # Async change notification via tokio::sync::watch.
 tokio = ["dep:tokio"]
 # The embedded native QuickJS PAC engine (compiles the quickjs-ng C sources via
-# `rquickjs-sys`). Optional on every platform. Off Windows it is one of the two
-# selectable backends; on Windows it is additionally useful for the `pac_bench`
-# WinHTTP-vs-embedded comparison.
+# `rquickjs-sys`). Optional on every platform and selected for normal PAC
+# resolution when it is the configured backend.
 pac-engine = ["dep:rquickjs-sys"]
 # The sandboxed PAC backend: QuickJS-NG compiled to WebAssembly (see
 # pac-wasm-guest/), run under Wasmtime in AOT mode. The runtime dependency is
@@ -91,8 +89,9 @@ wasmtime = { version = "=46.0.1", optional = true, default-features = false, fea
 cc = { version = "1", optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
-# PAC / wpad.dat fetching. Sync, small, rustls-backed so no OpenSSL cross headaches.
-ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+# PAC / wpad.dat fetching. Sync and rustls-backed, loading roots from the OS
+# trust store so locally installed enterprise CAs are honored.
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "gzip"] }
 # Embedded QuickJS-NG (MIT) for the native PAC engine. Vendors and compiles the
 # quickjs-ng C sources via `cc`. Optional (feature `pac-engine`) so a
 # Wasmtime-only build links no C engine.
@@ -113,10 +112,8 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
-# Optional on Windows so the default build stays pure Rust (WinHTTP handles
-# PAC). Enabled by the `pac-engine` feature for the WinHTTP-vs-QuickJS
-# benchmark. Off Windows the engine is always built (see the not(windows)
-# table above), where this crate is a required dependency.
+# Optional on Windows and enabled by the `pac-engine` feature, matching the
+# non-Windows dependency above.
 rquickjs-sys = { version = "0.12.1", optional = true }
 
 [dev-dependencies]

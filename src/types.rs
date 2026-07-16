@@ -129,20 +129,20 @@ impl fmt::Display for ProxyKind {
 }
 
 /// Selects which embedded engine evaluates PAC scripts on the caged worker
-/// (see [`ResolverOptions::pac_backend`](crate::ResolverOptions)). Does not
-/// affect Windows' regular resolution path, which delegates PAC to WinHTTP.
+/// (see [`ResolverOptions::pac_backend`](crate::ResolverOptions)). A
+/// backend-less Windows build delegates PAC to WinHTTP instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PacBackendKind {
     /// The in-process QuickJS-NG engine (C, compiled to native code). Built
-    /// on macOS/Linux always, on Windows behind the `pac-engine` feature.
+    /// on every platform behind the `pac-engine` feature.
     Native,
     /// The same QuickJS-NG engine compiled to WebAssembly and run inside a
     /// Wasmtime sandbox, so a memory-safety bug triggered by a hostile
     /// PAC/WPAD script is contained to the guest's linear memory. This is the
-    /// default backend; it requires the `pac-engine-wasmtime` feature (enabled
-    /// by default). Selecting it without that feature makes PAC evaluation
-    /// fail with [`Error::PacEval`].
+    /// preferred backend when compiled in; it requires the
+    /// `pac-engine-wasmtime` feature. Selecting it without that feature makes
+    /// PAC evaluation fail with [`Error::PacEval`].
     Wasmtime,
     /// The same WebAssembly guest as [`Wasmtime`](Self::Wasmtime), but
     /// translated to portable C with WABT's `wasm2c` and compiled like any
@@ -164,10 +164,10 @@ pub enum PacBackendKind {
 }
 
 impl Default for PacBackendKind {
-    /// The first compiled-in backend in preference order — Wasmtime (the
-    /// default feature set), then Native, then Wasm2c, then WasmtimeJit — so
-    /// the default is always one that actually works. (Backend-less builds
-    /// are Windows-only, where PAC never reaches an embedded backend.)
+    /// The first compiled-in backend in preference order — Wasmtime, then
+    /// Native, then Wasm2c, then WasmtimeJit — so the default is always one
+    /// that actually works. (Backend-less builds are Windows-only, where PAC
+    /// never reaches an embedded backend.)
     fn default() -> Self {
         if cfg!(feature = "pac-engine-wasmtime") {
             PacBackendKind::Wasmtime
@@ -222,7 +222,8 @@ impl std::error::Error for Error {}
 /// Parse a PAC-style result string ("PROXY h:p; SOCKS h:p; DIRECT") into an
 /// ordered list. Unknown tokens are skipped. Missing ports get the
 /// conventional defaults (80 for PROXY/HTTP, 443 for HTTPS, 1080 for SOCKS).
-/// On Windows, WinHTTP parses PAC results itself — this is only for tests.
+/// Backend-less Windows builds let WinHTTP parse PAC results; this is only for
+/// tests there.
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn parse_pac_result(s: &str) -> Vec<ProxyKind> {
     let mut out = Vec::new();
