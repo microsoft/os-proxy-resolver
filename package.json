@@ -7,6 +7,7 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "platform.js",
     "LICENSE.txt",
     "ThirdPartyNotices.txt"
   ],
@@ -24,6 +25,7 @@
   "scripts": {
     "build:native": "node npm/scripts/build-native.js",
     "test:npm": "node npm/test/smoke.js",
+    "test:platform-selection": "node npm/test/platform-selection.js",
     "verify:glibc": "node npm/scripts/verify-glibc.js",
     "verify:packages": "node npm/scripts/verify-packages.js"
   },
@@ -32,7 +34,9 @@
     "@vscode/os-proxy-resolver-darwin-x64": "0.2.0",
     "@vscode/os-proxy-resolver-linux-arm-gnueabihf": "0.2.0",
     "@vscode/os-proxy-resolver-linux-arm64-gnu": "0.2.0",
+    "@vscode/os-proxy-resolver-linux-arm64-musl": "0.2.0",
     "@vscode/os-proxy-resolver-linux-x64-gnu": "0.2.0",
+    "@vscode/os-proxy-resolver-linux-x64-musl": "0.2.0",
     "@vscode/os-proxy-resolver-win32-arm64-msvc": "0.2.0",
     "@vscode/os-proxy-resolver-win32-x64-msvc": "0.2.0"
   }

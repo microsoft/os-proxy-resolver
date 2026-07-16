@@ -135,6 +135,46 @@ extends:
             parameters:
               target: aarch64-unknown-linux-gnu
 
+      - name: os-proxy-resolver-linux-x64-musl
+        packagePlatform: Linux
+        rustTargets: x86_64-unknown-linux-musl
+        workingDirectory: npm/platforms/linux-x64-musl
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          - template: /azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+            parameters:
+              arch: x64
+              nodeVersion: 22.x
+          - template: azure-pipelines/steps/build-linux-musl-addon.yml@self
+            parameters:
+              target: x86_64-unknown-linux-musl
+
+      - name: os-proxy-resolver-linux-arm64-musl
+        packagePlatform: Linux
+        rustTargets: aarch64-unknown-linux-musl
+        workingDirectory: npm/platforms/linux-arm64-musl
+        publishPackage: ${{ parameters.publishPackage }}
+        publishPackageToAzureArtifacts: ${{ parameters.publishPackageToAzureArtifacts }}
+        skipAPIScan: true
+        ghCreateTag: false
+        ghCreateRelease: false
+        testPlatforms: {}
+        buildSteps:
+          - template: /azure-pipelines/common/steps/setup-linux-toolchains.yml@templates
+            parameters:
+              arch: arm64
+              nodeVersion: 22.x
+          # The x64 package agent cannot load an arm64 musl Node addon; GitHub
+          # CI cross-builds and runs the Rust tests under qemu.
+          - template: azure-pipelines/steps/build-linux-musl-addon.yml@self
+            parameters:
+              target: aarch64-unknown-linux-musl
+
       - name: os-proxy-resolver-linux-arm-gnueabihf
         packagePlatform: Linux
         rustTargets: armv7-unknown-linux-gnueabihf

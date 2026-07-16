@@ -75,6 +75,24 @@ jobs:
             artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
             use_cross: true
             run_tests: true
+          # Linux musl x86_64 + aarch64 via cross. The addon is cross-built but
+          # cannot be loaded by the glibc Node runtime on the hosted runner.
+          - name: linux musl x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
+            use_cross: true
+            build_cross_addon: true
+            run_tests: true
+          - name: linux musl aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            features: '--no-default-features --features "tokio pac-engine pac-engine-wasmtime pac-engine-wasm2c"'
+            artifact_features: '--no-default-features --features "tokio pac-engine-wasmtime"'
+            use_cross: true
+            build_cross_addon: true
+            run_tests: true
           # Linux armv7: no Wasmtime (no Cranelift backend for 32-bit ARM);
           # native + wasm2c, and the shipped artifact uses the wasm2c sandbox.
           - name: linux armv7
@@ -161,6 +179,13 @@ jobs:
 
       - name: Build Node addon
         if: ${{ !matrix.use_cross }}
+        run: node npm/scripts/build-native.js ${{ matrix.target }}
+        shell: bash
+
+      - name: Cross-build Node addon
+        if: matrix.build_cross_addon
+        env:
+          CARGO_BUILD_COMMAND: cross
         run: node npm/scripts/build-native.js ${{ matrix.target }}
         shell: bash
 
@@ -264,6 +289,8 @@ jobs:
           #   windows      : native QuickJS + Wasmtime AOT/JIT + wasm2c;
           #                  WinHTTP in a separate backend-less build
           #   macos/linux  : native QuickJS + Wasmtime AOT/JIT + wasm2c
+          #   linux musl   : same engines, built with `cross`; aarch64 runs
+          #                  under qemu
           #   linux armv7  : native QuickJS + wasm2c (no Cranelift for 32-bit
           #                  ARM), built with `cross` and run under qemu — the
           #                  absolute numbers are qemu-skewed, the point is
@@ -281,6 +308,20 @@ jobs:
             os: ubuntu-latest
             features: pac-engine pac-engine-wasmtime pac-engine-wasm2c pac-engine-wasmtime-jit
             iterations: 3000
+          - name: linux musl x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_cross: true
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c pac-engine-wasmtime-jit
+            iterations: 1000
+          - name: linux musl arm64 (qemu)
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_cross: true
+            # JIT startup exceeds the PAC timeout under nested QEMU emulation;
+            # x64 musl and native desktop jobs cover the JIT backend.
+            features: pac-engine pac-engine-wasmtime pac-engine-wasm2c
+            iterations: 200
           - name: linux armv7 (qemu)
             os: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
@@ -341,7 +382,7 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --locked
+        run: cargo install cross --version 0.2.5 --locked
 
       # Build pac_bench once per backend with ONLY that backend compiled in,
       # then measure and immediately benchmark that exact artifact. Real
@@ -349,7 +390,7 @@ jobs:
       # more meaningful than a combined all-backends binary. Each process
       # writes canonical URL/result rows; diffing those files preserves the
       # previous combined binary's byte-for-byte embedded-engine cross-check.
-      # (`--no-default-features` because the default set enables Wasmtime.)
+      # `--no-default-features` keeps every measured binary single-backend.
       - name: Build, measure, and benchmark each PAC backend
         run: |
           set -e
@@ -569,6 +610,7 @@ jobs:
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+      - run: npm run test:platform-selection
       - run: npm run verify:packages
 
   licenses:
