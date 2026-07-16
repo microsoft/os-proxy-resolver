@@ -51,6 +51,11 @@ pub struct ResolverOptions {
     /// Re-read the OS config after this long even without a change signal
     /// (covers platforms where no watcher could be started).
     pub config_ttl: Duration,
+    /// How long a completed per-URL proxy decision is reused. OS proxy config
+    /// changes invalidate cached decisions immediately.
+    pub resolution_ttl: Duration,
+    /// Maximum number of completed per-URL proxy decisions to retain.
+    pub resolution_cache_capacity: usize,
     /// Which embedded engine evaluates PAC scripts (macOS/Linux resolution,
     /// [`ProxyResolver::evaluate_pac`], and the non-WinHTTP paths of
     /// [`ProxyResolver::evaluate_pac_source`]). The default is the sandboxed
@@ -72,6 +77,8 @@ impl Default for ResolverOptions {
             wpad_negative_ttl: Duration::from_secs(300),
             retry_cooldown: Duration::from_secs(300),
             config_ttl: Duration::from_secs(30),
+            resolution_ttl: Duration::from_secs(30),
+            resolution_cache_capacity: 256,
             pac_backend: PacBackendKind::default(),
         }
     }
@@ -94,6 +101,7 @@ struct Inner {
     /// Keeps the platform change watcher alive; dropped with the resolver.
     _watcher: platform::Watcher,
     config_cache: Mutex<Option<ConfigCache>>,
+    resolution_cache: Mutex<HashMap<String, ResolutionCacheEntry>>,
     retry: Mutex<HashMap<ProxyKind, Instant>>,
     #[cfg(any(
         not(windows),
@@ -129,6 +137,12 @@ struct ConfigCache {
     generation: u64,
     read_at: Instant,
     config: OsProxyConfig,
+}
+
+struct ResolutionCacheEntry {
+    generation: u64,
+    at: Instant,
+    proxies: Vec<ProxyKind>,
 }
 
 #[cfg(not(windows))]
@@ -345,6 +359,7 @@ impl ProxyResolver {
                 notifier,
                 _watcher: watcher,
                 config_cache: Mutex::new(None),
+                resolution_cache: Mutex::new(HashMap::new()),
                 retry: Mutex::new(HashMap::new()),
                 #[cfg(any(
                     not(windows),
@@ -398,11 +413,18 @@ impl ProxyResolver {
         if url.host_str().is_none() {
             return Err(Error::InvalidUrl(url.to_string()));
         }
-        if let Some(list) = self.inner.env.proxy_for(url) {
+        if let Some(list) = self.cached_resolution(url) {
             return Ok(self.demote_bad(list));
         }
-        let config = self.os_config();
-        let list = self.resolve_from_os(&config, url);
+        let generation = self.config_generation();
+        let list = match self.inner.env.proxy_for(url) {
+            Some(list) => list,
+            None => {
+                let config = self.os_config();
+                self.resolve_from_os(&config, url)
+            }
+        };
+        self.cache_resolution(url, generation, &list);
         Ok(self.demote_bad(list))
     }
 
@@ -438,6 +460,9 @@ impl ProxyResolver {
     pub async fn resolve_proxy_async(&self, url: &Url) -> Result<Vec<ProxyKind>> {
         if url.host_str().is_none() {
             return Err(Error::InvalidUrl(url.to_string()));
+        }
+        if let Some(list) = self.cached_resolution(url) {
+            return Ok(self.demote_bad(list));
         }
         let worker = self
             .inner
@@ -570,6 +595,60 @@ impl ProxyResolver {
             config: config.clone(),
         });
         config
+    }
+
+    fn cached_resolution(&self, url: &Url) -> Option<Vec<ProxyKind>> {
+        if self.inner.options.resolution_ttl.is_zero()
+            || self.inner.options.resolution_cache_capacity == 0
+        {
+            return None;
+        }
+        let key = resolution_cache_key(url);
+        let generation = self.config_generation();
+        let mut cache = lock(&self.inner.resolution_cache);
+        match cache.get(&key) {
+            Some(entry)
+                if entry.generation == generation
+                    && entry.at.elapsed() < self.inner.options.resolution_ttl =>
+            {
+                Some(entry.proxies.clone())
+            }
+            Some(_) => {
+                cache.remove(&key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn cache_resolution(&self, url: &Url, generation: u64, proxies: &[ProxyKind]) {
+        let capacity = self.inner.options.resolution_cache_capacity;
+        if self.inner.options.resolution_ttl.is_zero() || capacity == 0 {
+            return;
+        }
+        if generation != self.config_generation() {
+            return;
+        }
+        let key = resolution_cache_key(url);
+        let mut cache = lock(&self.inner.resolution_cache);
+        cache.retain(|_, entry| entry.generation == generation);
+        if cache.len() >= capacity && !cache.contains_key(&key) {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.at)
+                .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            key,
+            ResolutionCacheEntry {
+                generation,
+                at: Instant::now(),
+                proxies: proxies.to_vec(),
+            },
+        );
     }
 
     fn read_proxy_config_with(
@@ -802,6 +881,14 @@ impl ProxyResolver {
     }
 }
 
+fn resolution_cache_key(url: &Url) -> String {
+    let mut key = url.clone();
+    key.set_fragment(None);
+    let _ = key.set_username("");
+    let _ = key.set_password(None);
+    key.into()
+}
+
 impl Default for ProxyResolver {
     fn default() -> Self {
         Self::new()
@@ -932,6 +1019,63 @@ mod tests {
     }
 
     #[test]
+    fn completed_resolution_cache_is_invalidated_by_config_generation() {
+        let resolver = ProxyResolver::with_env(
+            ResolverOptions::default(),
+            env(&[("https_proxy", "http://proxy.example:3128")]),
+        );
+        let target = url("https://example.com/path");
+        resolver.cache_resolution(&target, resolver.config_generation(), &[ProxyKind::Direct]);
+
+        assert_eq!(
+            resolver.resolve_proxy(&target).unwrap(),
+            vec![ProxyKind::Direct]
+        );
+
+        resolver.inner.notifier.bump();
+        assert_eq!(
+            resolver.resolve_proxy(&target).unwrap(),
+            vec![ProxyKind::Http("proxy.example:3128".into())]
+        );
+    }
+
+    #[test]
+    fn stale_resolution_cannot_overwrite_current_generation() {
+        let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+        let target = url("https://example.com/path");
+        let stale_generation = resolver.config_generation();
+        resolver.inner.notifier.bump();
+        resolver.cache_resolution(
+            &target,
+            resolver.config_generation(),
+            &[ProxyKind::Http("current.example:3128".into())],
+        );
+
+        resolver.cache_resolution(&target, stale_generation, &[ProxyKind::Direct]);
+
+        assert_eq!(
+            resolver.cached_resolution(&target),
+            Some(vec![ProxyKind::Http("current.example:3128".into())])
+        );
+    }
+
+    #[test]
+    fn resolution_cache_key_preserves_path_and_query() {
+        assert_ne!(
+            resolution_cache_key(&url("http://example.com/one?value=1#fragment")),
+            resolution_cache_key(&url("http://example.com/two?value=1#fragment"))
+        );
+        assert_ne!(
+            resolution_cache_key(&url("http://example.com/one?value=1")),
+            resolution_cache_key(&url("http://example.com/one?value=2"))
+        );
+        assert_eq!(
+            resolution_cache_key(&url("http://user:secret@example.com/one#first")),
+            resolution_cache_key(&url("http://example.com/one#second"))
+        );
+    }
+
+    #[test]
     fn proxy_config_prefers_wpad_and_does_not_evaluate() {
         let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
         let config = OsProxyConfig {
@@ -1027,6 +1171,21 @@ mod tests {
                 vec![ProxyKind::Http("proxy.example:3128".into())]
             );
         }
+        assert_eq!(
+            resolver
+                .inner
+                .async_resolution_starts
+                .load(Ordering::SeqCst),
+            1
+        );
+
+        assert_eq!(
+            resolver
+                .resolve_proxy_async(&url("https://example.com/"))
+                .await
+                .unwrap(),
+            vec![ProxyKind::Http("proxy.example:3128".into())]
+        );
         assert_eq!(
             resolver
                 .inner

@@ -19,8 +19,11 @@ for proxy in resolve_proxy(&url)? {
 Results mirror PAC semantics: `"PROXY a:8080; DIRECT"` → an *ordered* fallback
 list `[Http("a:8080"), Direct]`. The base API is synchronous and may block on
 network I/O up to configured timeouts. With the `tokio` feature, use
-`resolve_proxy_async` instead: blocking resolution is scheduled onto a lazy background thread, identical concurrent calls share a result, and distinct targets
-queue without consuming async-runtime blocking threads.
+`resolve_proxy_async` instead: blocking resolution is scheduled onto a lazy
+background thread, identical concurrent calls share a result, and distinct
+targets queue without consuming async-runtime blocking threads. Completed
+per-URL decisions are cached for 30 seconds by default; an OS configuration
+change invalidates them immediately.
 
 ```rust
 let proxies = os_proxy_resolver::resolve_proxy_async(&url).await?;
@@ -157,8 +160,11 @@ These are the primitives an FFI bridge adapts — e.g. a napi-rs
 `'change'` event, with `config_generation` exposed as a sync getter (i64 in
 JS). The payload is intentionally dumb: "changed", no diff.
 
-VPN connect, Wi-Fi switch, and resume all invalidate cached PAC state: caches
-store the generation they were built at and re-resolve when it moves.
+VPN connect, Wi-Fi switch, and resume all invalidate cached PAC state and
+completed per-URL decisions: caches store the generation they were built at
+and re-resolve when it moves. The short result TTL still matters because PAC
+scripts can depend on time, DNS, and local network state without a config
+change.
 
 ## Reading the OS configuration
 
