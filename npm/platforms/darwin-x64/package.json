@@ -1,6 +1,6 @@
 {
   "name": "@vscode/os-proxy-resolver-darwin-x64",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Native binding for @vscode/os-proxy-resolver on macOS x64",
   "main": "os_proxy_resolver.node",
   "files": ["os_proxy_resolver.node", "LICENSE.txt", "ThirdPartyNotices.txt"],

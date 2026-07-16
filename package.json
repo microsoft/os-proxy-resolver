@@ -1,6 +1,6 @@
 {
   "name": "@vscode/os-proxy-resolver",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Resolve the operating system proxy configuration from Node.js",
   "main": "index.js",
   "types": "index.d.ts",
@@ -30,14 +30,14 @@
     "verify:packages": "node npm/scripts/verify-packages.js"
   },
   "optionalDependencies": {
-    "@vscode/os-proxy-resolver-darwin-arm64": "0.2.0",
-    "@vscode/os-proxy-resolver-darwin-x64": "0.2.0",
-    "@vscode/os-proxy-resolver-linux-arm-gnueabihf": "0.2.0",
-    "@vscode/os-proxy-resolver-linux-arm64-gnu": "0.2.0",
-    "@vscode/os-proxy-resolver-linux-arm64-musl": "0.2.0",
-    "@vscode/os-proxy-resolver-linux-x64-gnu": "0.2.0",
-    "@vscode/os-proxy-resolver-linux-x64-musl": "0.2.0",
-    "@vscode/os-proxy-resolver-win32-arm64-msvc": "0.2.0",
-    "@vscode/os-proxy-resolver-win32-x64-msvc": "0.2.0"
+    "@vscode/os-proxy-resolver-darwin-arm64": "0.3.0",
+    "@vscode/os-proxy-resolver-darwin-x64": "0.3.0",
+    "@vscode/os-proxy-resolver-linux-arm-gnueabihf": "0.3.0",
+    "@vscode/os-proxy-resolver-linux-arm64-gnu": "0.3.0",
+    "@vscode/os-proxy-resolver-linux-arm64-musl": "0.3.0",
+    "@vscode/os-proxy-resolver-linux-x64-gnu": "0.3.0",
+    "@vscode/os-proxy-resolver-linux-x64-musl": "0.3.0",
+    "@vscode/os-proxy-resolver-win32-arm64-msvc": "0.3.0",
+    "@vscode/os-proxy-resolver-win32-x64-msvc": "0.3.0"
   }
 }
