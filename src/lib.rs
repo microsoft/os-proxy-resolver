@@ -74,11 +74,13 @@
 //!
 //! # Change notification
 //!
-//! Two complementary primitives, identical across platforms:
+//! Completed per-URL decisions are cached briefly and invalidated immediately
+//! when the OS proxy configuration changes. Three complementary change
+//! primitives are also available to consumers, identically across platforms:
 //!
 //! - [`ProxyResolver::config_generation`] — a cheap synchronous counter,
-//!   bumped on every OS config change. Cached results should remember the
-//!   generation they were computed at.
+//!   bumped on every OS config change. External derived state can remember the
+//!   generation it was computed at.
 //! - [`ProxyResolver::on_change`] — a callback (drop the [`Subscription`] to
 //!   unregister). Runs on the watcher thread: keep it cheap, never call
 //!   `resolve_proxy` from it. This is the primitive an FFI bridge (e.g. a
