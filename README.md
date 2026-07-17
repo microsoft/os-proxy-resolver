@@ -258,7 +258,9 @@ GNU Linux addons are built with the pinned glibc 2.28 sysroots from the shared
 `vscode-engineering` npm pipeline and then inspected with that toolchain's
 `objdump`; publishing fails if any final `.node` artifact requires a GLIBC
 symbol newer than 2.28. This keeps them compatible with VS Code's glibc 2.28
-desktop baseline. Musl addons are cross-compiled in pinned `cross` containers.
+desktop baseline. Azure publishing builds musl addons directly with Cargo and
+pinned musl compiler toolchains; GitHub CI also validates them in pinned
+`cross` containers.
 
 ```js
 const {

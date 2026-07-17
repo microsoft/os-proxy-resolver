@@ -7,13 +7,52 @@ steps:
 
   - bash: |
       set -e
-      cargo install cross --version 0.2.5 --locked
       mkdir -p "$(Agent.TempDirectory)/wabt" pac-wasm-guest/generated
       curl -sSL "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz" \
         | tar xz --strip-components=1 -C "$(Agent.TempDirectory)/wabt"
       "$(Agent.TempDirectory)/wabt/bin/wasm2c" pac-wasm-guest/pac_guest.wasm --module-name pac_guest \
         -o pac-wasm-guest/generated/pac_guest.c
-      CARGO_BUILD_COMMAND=cross \
-        OS_PROXY_RESOLVER_PAC_GUEST_C_DIR=pac-wasm-guest/generated \
+
+      case "${{ parameters.target }}" in
+        x86_64-unknown-linux-musl)
+          sudo apt-get update
+          sudo apt-get install -yq musl-dev musl-tools
+          sudo ln -sf /usr/bin/g++ /usr/bin/musl-g++
+          compiler=musl-gcc
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          export CC_x86_64_unknown_linux_musl=musl-gcc
+          export CXX_x86_64_unknown_linux_musl=musl-g++
+          ;;
+        aarch64-unknown-linux-musl)
+          toolchain_root="$(Agent.TempDirectory)/aarch64-linux-musl"
+          toolchain_archive="$(Agent.TempDirectory)/aarch64-linux-musl-gcc-10.3.0.tar.gz"
+          mkdir -p "$toolchain_root"
+          curl -sSL "https://github.com/microsoft/vscode-linux-build-agent/releases/download/v20260212-405735/aarch64-linux-musl-gcc-10.3.0.tar.gz" \
+            -o "$toolchain_archive"
+          echo "58cd59ee4038291fe8a7f4adccac0ecbe8d23cbad1cb650b381e45e7e1e22424  $toolchain_archive" | sha256sum --check
+          tar -xzf "$toolchain_archive" -C "$toolchain_root"
+          compiler="$toolchain_root/output/bin/aarch64-linux-musl-gcc"
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$compiler"
+          export CC_aarch64_unknown_linux_musl="$compiler"
+          export CXX_aarch64_unknown_linux_musl="$toolchain_root/output/bin/aarch64-linux-musl-g++"
+          ;;
+        *)
+          echo "Unsupported musl target: ${{ parameters.target }}" >&2
+          exit 2
+          ;;
+      esac
+
+      # Rust requests libgcc_s when crt-static is disabled for the Node cdylib,
+      # but musl toolchains only ship static libgcc archives. Expose those
+      # archives through a linker script so the addon depends only on libc.so.
+      libgcc=$("$compiler" -print-libgcc-file-name)
+      libgcc_eh="$(dirname "$libgcc")/libgcc_eh.a"
+      libgcc_shim="$(Agent.TempDirectory)/musl-libgcc"
+      mkdir -p "$libgcc_shim"
+      printf 'GROUP ( %s %s )\n' "$libgcc" "$libgcc_eh" > "$libgcc_shim/libgcc_s.so"
+      target_env=$(echo "${{ parameters.target }}" | tr '[:lower:]-' '[:upper:]_')
+      export "CARGO_TARGET_${target_env}_RUSTFLAGS=-C link-arg=-L$libgcc_shim"
+
+      OS_PROXY_RESOLVER_PAC_GUEST_C_DIR=pac-wasm-guest/generated \
         node npm/scripts/build-native.js ${{ parameters.target }}
     displayName: Build Linux musl addon

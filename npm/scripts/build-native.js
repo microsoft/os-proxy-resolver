@@ -24,7 +24,7 @@ if (!targets[target]) {
 }
 
 const cargo = process.env.CARGO_BUILD_COMMAND || 'cargo';
-const useCross = cargo === 'cross';
+const useCross = path.basename(cargo) === 'cross';
 const cwd = useCross ? path.join(root, 'npm', 'native') : root;
 // Cargo appends the target triple below --target-dir. Prefixing the target dir
 // with the triple isolates host build scripts created by incompatible cross
