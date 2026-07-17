@@ -8,9 +8,9 @@ use std::fmt;
 /// A snapshot of the proxy configuration read from the operating system.
 ///
 /// This API does not consider proxy environment variables and never evaluates
-/// a PAC script. When auto-detection is enabled, DNS WPAD discovery is
-/// attempted before the explicitly configured PAC URL, matching proxy
-/// resolution precedence.
+/// a PAC script. When auto-detection is enabled, WPAD discovery is attempted
+/// before the explicitly configured PAC URL (DHCP before DNS on Windows),
+/// matching proxy resolution precedence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProxyConfig {
@@ -28,7 +28,7 @@ pub struct ProxyConfig {
     pub platform: Option<PlatformProxyConfig>,
 }
 
-/// A PAC script loaded from an operating-system setting or DNS WPAD.
+/// A PAC script loaded from an operating-system setting or WPAD.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PacScript {
@@ -45,7 +45,9 @@ pub struct PacScript {
 #[non_exhaustive]
 pub enum PacScriptSource {
     /// Found through DNS WPAD (`http://wpad.<domain>/wpad.dat`).
-    Wpad,
+    WpadDns,
+    /// Found through DHCP WPAD (option 252).
+    WpadDhcp,
     /// Loaded from the explicit PAC URL configured by the operating system.
     Configured,
 }

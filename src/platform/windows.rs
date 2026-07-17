@@ -26,15 +26,8 @@ use crate::types::{with_default_port, PlatformProxyConfig, ProxyKind, WindowsPro
 use crate::types::{Error, Result};
 use std::ffi::c_void;
 use std::sync::Arc;
-#[cfg(not(any(
-    feature = "pac-engine",
-    feature = "pac-engine-wasmtime",
-    feature = "pac-engine-wasmtime-jit",
-    feature = "pac-engine-wasm2c"
-)))]
-use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GlobalFree, ERROR_BUFFER_OVERFLOW, HANDLE, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, GlobalFree, ERROR_BUFFER_OVERFLOW, HANDLE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
@@ -49,10 +42,11 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpGetProxyForUrl, WinHttpOpen, WINHTTP_ACCESS_TYPE_NO_PROXY,
     WINHTTP_AUTOPROXY_AUTO_DETECT, WINHTTP_AUTOPROXY_CONFIG_URL, WINHTTP_AUTOPROXY_OPTIONS,
-    WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_AUTO_DETECT_TYPE_DNS_A, WINHTTP_PROXY_INFO,
+    WINHTTP_AUTO_DETECT_TYPE_DNS_A, WINHTTP_PROXY_INFO,
 };
 use windows_sys::Win32::Networking::WinHttp::{
-    WinHttpGetIEProxyConfigForCurrentUser, WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
+    WinHttpDetectAutoProxyConfigUrl, WinHttpGetIEProxyConfigForCurrentUser,
+    WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
 };
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 use windows_sys::Win32::System::Registry::{
@@ -122,6 +116,21 @@ pub(crate) fn read_config() -> OsProxyConfig {
         }
     }
     config
+}
+
+/// Discover the DHCP option 252 PAC URL. WinHTTP tries DHCP before DNS when
+/// both mechanisms are requested; keeping this probe separate lets inspection
+/// report which mechanism supplied the script.
+pub(crate) fn detect_dhcp_wpad_url() -> Option<String> {
+    let mut url = std::ptr::null_mut();
+    if unsafe { WinHttpDetectAutoProxyConfigUrl(WINHTTP_AUTO_DETECT_TYPE_DHCP, &mut url) } == 0 {
+        log::debug!(
+            "WinHttpDetectAutoProxyConfigUrl(DHCP) failed: error {}",
+            unsafe { GetLastError() }
+        );
+        return None;
+    }
+    unsafe { take_wide_string(url) }
 }
 
 /// Connection-specific DNS suffixes used for DNS WPAD candidate generation.

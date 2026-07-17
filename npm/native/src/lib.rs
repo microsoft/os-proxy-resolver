@@ -160,7 +160,8 @@ impl From<os_proxy_resolver::ProxyConfig> for NodeProxyConfig {
                 url: pac.url,
                 content: pac.content,
                 source: match pac.source {
-                    PacScriptSource::Wpad => "wpad",
+                    PacScriptSource::WpadDns => "wpad-dns",
+                    PacScriptSource::WpadDhcp => "wpad-dhcp",
                     PacScriptSource::Configured => "configured",
                     _ => "unknown",
                 }

@@ -39,16 +39,15 @@
 //!
 //! | | config source | PAC/WPAD engine | change signal |
 //! |---|---|---|---|
-//! | Windows | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DNS WPAD; WinHTTP fallback with no backend | registry notification |
+//! | Windows | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DHCP/DNS WPAD; WinHTTP fallback with no backend | registry notification |
 //! | macOS | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
 //! | Linux | GNOME `org.gnome.system.proxy` (gsettings) | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
 //!
-//! On Windows, WinHTTP always reads Internet Settings. When an embedded PAC
-//! backend is compiled in, normal resolution uses that backend and shared DNS
-//! WPAD discovery. A backend-less Windows build instead delegates PAC and WPAD
-//! resolution to WinHTTP, including DHCP option 252. DHCP-based WPAD is not
-//! available with an embedded backend or on macOS/Linux; DNS-based WPAD walks
-//! `wpad.<search-domain>` with tight timeouts.
+//! On Windows, WinHTTP always reads Internet Settings. DHCP option 252 is
+//! probed before the shared DNS WPAD path; an embedded PAC backend evaluates
+//! the discovered script, while a backend-less build delegates PAC evaluation
+//! to WinHTTP. DHCP-based WPAD is not available on macOS/Linux; DNS-based WPAD
+//! walks `wpad.<search-domain>` with tight timeouts.
 //!
 //! # The PAC cage
 //!

@@ -30,7 +30,7 @@ async function main() {
 	if (config.pac) {
 		assert.strictEqual(typeof config.pac.url, 'string');
 		assert.strictEqual(typeof config.pac.content, 'string');
-		assert.ok(['wpad', 'configured', 'unknown'].includes(config.pac.source));
+		assert.ok(['wpad-dns', 'wpad-dhcp', 'configured', 'unknown'].includes(config.pac.source));
 	}
 	if (config.platform) {
 		assert.ok(['windows', 'macos', 'linux', 'unknown'].includes(config.platform.kind));

@@ -23,15 +23,15 @@ export interface Proxy {
 }
 
 /** How a PAC script was selected. */
-export type PacScriptSource = 'wpad' | 'configured' | 'unknown';
+export type PacScriptSource = 'wpad-dns' | 'wpad-dhcp' | 'configured' | 'unknown';
 
-/** A PAC script loaded from an OS setting or DNS WPAD, but not evaluated. */
+/** A PAC script loaded from an OS setting or WPAD, but not evaluated. */
 export interface PacScript {
 	/** The configured or discovered URL from which {@link content} was loaded. */
 	url: string;
 	/** The PAC JavaScript source. */
 	content: string;
-	/** Whether the script came from DNS WPAD or an explicit OS setting. */
+	/** Whether the script came from DNS/DHCP WPAD or an explicit OS setting. */
 	source: PacScriptSource;
 }
 
@@ -115,7 +115,8 @@ export declare class ProxyResolver {
 	 * Reads the operating-system proxy configuration without evaluating PAC.
 	 *
 	 * Proxy environment variables are not included. If auto-detection is
-	 * enabled, DNS WPAD discovery runs before the configured PAC URL is loaded.
+	 * enabled, WPAD discovery runs before the configured PAC URL is loaded
+	 * (DHCP before DNS on Windows).
 	 * Potentially blocking OS, DNS, and network work runs outside the JavaScript
 	 * event loop.
 	 */

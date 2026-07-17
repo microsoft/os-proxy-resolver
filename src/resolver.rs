@@ -482,21 +482,16 @@ impl ProxyResolver {
 
     /// Read the current proxy configuration from the operating system.
     ///
-    /// When automatic discovery is enabled, this performs DNS WPAD discovery
-    /// and loads the first usable `wpad.dat`. If discovery finds nothing, the
-    /// explicitly configured PAC URL is loaded instead. The returned PAC
-    /// source is never evaluated. Proxy environment variables are not part of
-    /// this operating-system snapshot.
+    /// When automatic discovery is enabled, this performs WPAD discovery and
+    /// loads the first usable `wpad.dat` (DHCP before DNS on Windows). If
+    /// discovery finds nothing, the explicitly configured PAC URL is loaded
+    /// instead. The returned PAC source is never evaluated. Proxy environment
+    /// variables are not part of this operating-system snapshot.
     pub fn read_proxy_config(&self) -> ProxyConfig {
         let config = self.os_config();
         self.read_proxy_config_with(
             config,
-            || {
-                crate::wpad::discover(
-                    self.inner.options.wpad_dns_timeout,
-                    self.inner.options.wpad_fetch_timeout,
-                )
-            },
+            || self.discover_wpad(),
             |url| crate::fetch::fetch_pac(url, self.inner.options.pac_fetch_timeout),
         )
     }
@@ -733,7 +728,7 @@ impl ProxyResolver {
             discover_wpad().map(|discovered| PacScript {
                 url: discovered.url,
                 content: discovered.content,
-                source: PacScriptSource::Wpad,
+                source: discovered.source,
             })
         } else {
             None
@@ -940,11 +935,9 @@ impl ProxyResolver {
                 c.generation == generation && c.at.elapsed() < ttl
             });
             if !valid {
-                let script = crate::wpad::discover(
-                    self.inner.options.wpad_dns_timeout,
-                    self.inner.options.wpad_fetch_timeout,
-                )
-                .map(|pac| Arc::<str>::from(pac.content));
+                let script = self
+                    .discover_wpad()
+                    .map(|pac| Arc::<str>::from(pac.content));
                 *cache = Some(WpadCache {
                     generation,
                     at: Instant::now(),
@@ -954,6 +947,29 @@ impl ProxyResolver {
             cache.as_ref().and_then(|c| c.script.clone())?
         };
         self.eval_for_resolution(&script, url)
+    }
+
+    fn discover_wpad(&self) -> Option<crate::wpad::DiscoveredPac> {
+        #[cfg(windows)]
+        if let Some(url) = platform::detect_dhcp_wpad_url() {
+            match crate::fetch::fetch_pac(&url, self.inner.options.wpad_fetch_timeout) {
+                Ok(content) if content.contains("FindProxyForURL") => {
+                    log::info!("WPAD: using DHCP URL {url}");
+                    return Some(crate::wpad::DiscoveredPac {
+                        url,
+                        content,
+                        source: PacScriptSource::WpadDhcp,
+                    });
+                }
+                Ok(_) => log::warn!("WPAD: DHCP URL {url} does not look like a PAC script"),
+                Err(error) => log::debug!("WPAD: {error}"),
+            }
+        }
+
+        crate::wpad::discover(
+            self.inner.options.wpad_dns_timeout,
+            self.inner.options.wpad_fetch_timeout,
+        )
     }
 
     /// Best-effort local IP for PAC `myIpAddress()`, so the engine doesn't
@@ -1197,6 +1213,7 @@ mod tests {
                 Some(crate::wpad::DiscoveredPac {
                     url: "http://wpad.example/wpad.dat".into(),
                     content: "function FindProxyForURL() { return 'DIRECT'; }".into(),
+                    source: PacScriptSource::WpadDns,
                 })
             },
             |_| panic!("configured PAC must not load when WPAD succeeds"),
@@ -1206,7 +1223,7 @@ mod tests {
             Some(PacScript {
                 url: "http://wpad.example/wpad.dat".into(),
                 content: "function FindProxyForURL() { return 'DIRECT'; }".into(),
-                source: PacScriptSource::Wpad,
+                source: PacScriptSource::WpadDns,
             })
         );
         assert_eq!(
@@ -1221,6 +1238,27 @@ mod tests {
             feature = "pac-engine-wasm2c"
         ))]
         assert!(resolver.inner.pac.get().is_none());
+    }
+
+    #[test]
+    fn proxy_config_preserves_dhcp_wpad_source() {
+        let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+        let snapshot = resolver.read_proxy_config_with(
+            OsProxyConfig {
+                auto_detect: true,
+                ..Default::default()
+            },
+            || {
+                Some(crate::wpad::DiscoveredPac {
+                    url: "http://dhcp.example/proxy.pac".into(),
+                    content: "function FindProxyForURL() { return 'DIRECT'; }".into(),
+                    source: PacScriptSource::WpadDhcp,
+                })
+            },
+            |_| panic!("configured PAC must not load when DHCP WPAD succeeds"),
+        );
+
+        assert_eq!(snapshot.pac.unwrap().source, PacScriptSource::WpadDhcp);
     }
 
     #[test]

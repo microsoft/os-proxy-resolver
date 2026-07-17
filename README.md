@@ -53,7 +53,7 @@ resolution.
 
 | | config source | PAC + WPAD | change signal |
 |---|---|---|---|
-| **Windows** | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DNS WPAD; WinHTTP fallback when backend-less | registry change notification |
+| **Windows** | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DHCP/DNS WPAD; WinHTTP fallback when backend-less | registry change notification |
 | **macOS** | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
 | **Linux** | GNOME `org.gnome.system.proxy` via `gsettings` | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
 
@@ -95,9 +95,9 @@ backend-less Windows build is valid and uses WinHTTP for PAC and WPAD
 resolution. The PAC helper functions are first-party JavaScript implemented
 from the public PAC specification.
 
-Non-goals: DHCP-based WPAD (option 252) when using an embedded backend or on
-macOS/Linux, KDE proxy settings, proxy authentication credentials. A
-backend-less Windows build gets DHCP WPAD through WinHTTP.
+Non-goals: DHCP-based WPAD (option 252) on macOS/Linux, KDE proxy settings,
+proxy authentication credentials. Windows probes DHCP before DNS for both
+embedded and WinHTTP-backed resolution.
 
 ## The PAC cage
 
@@ -186,13 +186,12 @@ if let Some(pac) = config.pac {
 The snapshot includes normalized static HTTP/HTTPS/SOCKS rules and, when the
 native source was available, source-specific settings from WinHTTP,
 SystemConfiguration, or GNOME GSettings. Proxy environment variables are not
-included. If auto-detection is enabled, the call performs DNS WPAD discovery
-first; if no usable `wpad.dat` is found, it loads the configured PAC URL. PAC
-loading is best-effort and synchronous, using the timeouts in `ResolverOptions`.
-The returned script includes its configured or discovered URL and is never
-evaluated. Windows DNS WPAD uses adapter DNS suffixes. DHCP option 252 is only
-available for URL resolution in a backend-less Windows build through WinHTTP;
-it is not queried by this inspection API.
+included. If auto-detection is enabled, the call performs WPAD discovery first
+(DHCP before DNS on Windows); if no usable `wpad.dat` is found, it loads the
+configured PAC URL. PAC loading is best-effort and synchronous, using the
+timeouts in `ResolverOptions`. The returned script includes its configured or
+discovered URL, reports `WpadDhcp` or `WpadDns`, and is never evaluated. Windows
+DNS WPAD uses adapter DNS suffixes.
 
 ## Bad-proxy feedback
 

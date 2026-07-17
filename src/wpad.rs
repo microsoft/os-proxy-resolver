@@ -3,9 +3,8 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! DNS-based WPAD discovery. Windows uses this path when an embedded PAC
-//! backend is compiled in. A backend-less Windows build delegates WPAD,
-//! including DHCP option 252, to WinHTTP. DHCP-based discovery is otherwise a
+//! DNS-based WPAD discovery. Windows probes DHCP option 252 separately before
+//! falling back to this shared DNS path. DHCP-based discovery is otherwise a
 //! documented non-goal here.
 //!
 //! Strategy: take the DNS search domains from the OS resolver configuration
@@ -21,6 +20,7 @@
 //! fetch gets a slightly longer one, and the caller caches negative results.
 
 use crate::fetch::fetch_pac;
+use crate::types::PacScriptSource;
 use std::net::ToSocketAddrs;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -29,6 +29,7 @@ use std::time::Duration;
 pub(crate) struct DiscoveredPac {
     pub url: String,
     pub content: String,
+    pub source: PacScriptSource,
 }
 
 /// Returns the fetched `wpad.dat` PAC script and its discovered URL, or `None`
@@ -65,6 +66,7 @@ fn discover_with_domains_using(
                 return Some(DiscoveredPac {
                     url,
                     content: script,
+                    source: PacScriptSource::WpadDns,
                 });
             }
             Ok(_) => log::warn!("WPAD: {url} does not look like a PAC script, skipping"),
@@ -214,5 +216,6 @@ mod tests {
         .unwrap();
         assert_eq!(pac.url, "http://wpad.corp.example.com/wpad.dat");
         assert!(pac.content.contains("FindProxyForURL"));
+        assert_eq!(pac.source, PacScriptSource::WpadDns);
     }
 }
