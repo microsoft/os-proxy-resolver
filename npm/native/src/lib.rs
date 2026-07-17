@@ -12,8 +12,8 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Error, JsFunction, JsUnknown, Result, Status};
 use napi_derive::napi;
 use os_proxy_resolver::{
-    PacScriptSource, PacSourceState, PacSourceStatus, PlatformProxyConfig, ProxyKind,
-    StaticProxyRules, Subscription,
+    EnvironmentProxyConfig, EnvironmentVariableStatus, PacScriptSource, PacSourceState,
+    PacSourceStatus, PlatformProxyConfig, ProxyKind, StaticProxyRules, Subscription,
 };
 
 #[napi(object)]
@@ -100,6 +100,42 @@ impl From<PacSourceStatus> for NodePacSourceStatus {
 }
 
 #[napi(object)]
+pub struct NodeEnvironmentVariableStatus {
+    pub variable: String,
+    pub value: String,
+    pub error: Option<String>,
+}
+
+impl From<EnvironmentVariableStatus> for NodeEnvironmentVariableStatus {
+    fn from(status: EnvironmentVariableStatus) -> Self {
+        Self {
+            variable: status.variable,
+            value: status.value,
+            error: status.error,
+        }
+    }
+}
+
+#[napi(object)]
+pub struct NodeEnvironmentProxyConfig {
+    pub http_proxy: Option<NodeEnvironmentVariableStatus>,
+    pub https_proxy: Option<NodeEnvironmentVariableStatus>,
+    pub all_proxy: Option<NodeEnvironmentVariableStatus>,
+    pub no_proxy: Option<NodeEnvironmentVariableStatus>,
+}
+
+impl From<EnvironmentProxyConfig> for NodeEnvironmentProxyConfig {
+    fn from(config: EnvironmentProxyConfig) -> Self {
+        Self {
+            http_proxy: config.http_proxy.map(Into::into),
+            https_proxy: config.https_proxy.map(Into::into),
+            all_proxy: config.all_proxy.map(Into::into),
+            no_proxy: config.no_proxy.map(Into::into),
+        }
+    }
+}
+
+#[napi(object)]
 pub struct NodeStaticProxyRules {
     pub http: Option<Proxy>,
     pub https: Option<Proxy>,
@@ -172,6 +208,7 @@ impl From<PlatformProxyConfig> for NodePlatformProxyConfig {
 
 #[napi(object)]
 pub struct NodeProxyConfig {
+    pub environment: NodeEnvironmentProxyConfig,
     pub auto_detect: bool,
     pub pac_url: Option<String>,
     pub pac: Option<NodePacScript>,
@@ -185,6 +222,7 @@ pub struct NodeProxyConfig {
 impl From<os_proxy_resolver::ProxyConfig> for NodeProxyConfig {
     fn from(config: os_proxy_resolver::ProxyConfig) -> Self {
         Self {
+            environment: config.environment.into(),
             auto_detect: config.auto_detect,
             pac_url: config.pac_url,
             pac: config.pac.map(|pac| NodePacScript {

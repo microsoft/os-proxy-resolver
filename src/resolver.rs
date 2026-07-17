@@ -518,10 +518,10 @@ impl ProxyResolver {
 
     /// Read the current proxy configuration from the operating system.
     ///
-    /// Inspects DHCP WPAD, DNS WPAD, and the configured PAC independently,
-    /// including failures. `pac` is the first available script by precedence
-    /// (DHCP, DNS, configured) and is never evaluated. Proxy environment
-    /// variables are not part of this operating-system snapshot.
+    /// Includes captured proxy environment variables and independently inspects
+    /// DHCP WPAD, DNS WPAD, and the configured PAC, including failures. `pac`
+    /// is the first available script by precedence (DHCP, DNS, configured) and
+    /// is never evaluated.
     pub fn read_proxy_config(&self) -> ProxyConfig {
         let config = self.os_config();
         let wpad_dhcp = self.inspect_dhcp_wpad(config.auto_detect);
@@ -778,6 +778,7 @@ impl ProxyResolver {
             socks: rules.socks.clone(),
         });
         ProxyConfig {
+            environment: self.inner.env.diagnostics(),
             auto_detect: config.auto_detect,
             pac_url: config.pac_url,
             pac,
@@ -852,11 +853,18 @@ impl ProxyResolver {
             return PacInspection::state(PacSourceState::Unconfigured);
         };
         match crate::fetch::fetch_pac(url, self.inner.options.pac_fetch_timeout) {
-            Ok(content) => PacInspection::available(PacScript {
-                url: url.to_string(),
-                content,
-                source: PacScriptSource::Configured,
-            }),
+            Ok(content) if content.contains("FindProxyForURL") => {
+                PacInspection::available(PacScript {
+                    url: url.to_string(),
+                    content,
+                    source: PacScriptSource::Configured,
+                })
+            }
+            Ok(_) => PacInspection::error(
+                PacSourceState::ErrorDownload,
+                Some(url.to_string()),
+                format!("{url} does not look like a PAC script"),
+            ),
             Err(error) => PacInspection::error(
                 PacSourceState::ErrorDownload,
                 Some(url.to_string()),
@@ -1403,6 +1411,26 @@ mod tests {
             Some("file:///nonexistent/proxy.pac")
         );
         assert!(inspection.status.error.is_some());
+    }
+
+    #[test]
+    fn configured_pac_rejects_non_pac_content() {
+        let dir = std::env::temp_dir().join("os-proxy-resolver-configured-pac-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("invalid.pac");
+        std::fs::write(&path, "<html>not a PAC script</html>").unwrap();
+        let url = url::Url::from_file_path(&path).unwrap();
+        let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+
+        let inspection = resolver.inspect_configured_pac(Some(url.as_str()));
+
+        assert!(inspection.pac.is_none());
+        assert_eq!(inspection.status.state, PacSourceState::ErrorDownload);
+        assert!(inspection
+            .status
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("does not look like a PAC script")));
     }
 
     #[cfg(feature = "tokio")]

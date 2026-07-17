@@ -26,6 +26,10 @@ async function main() {
 	assert.strictEqual(typeof resolver.readProxyConfig, 'function');
 	assert.strictEqual(typeof resolver.configGeneration, 'number');
 	const config = await resolver.readProxyConfig();
+	for (const status of Object.values(config.environment)) {
+		assert.strictEqual(typeof status.variable, 'string');
+		assert.strictEqual(typeof status.value, 'string');
+	}
 	assert.strictEqual(typeof config.autoDetect, 'boolean');
 	for (const status of [config.wpadDhcp, config.wpadDns, config.configuredPac]) {
 		assert.strictEqual(typeof status.state, 'string');

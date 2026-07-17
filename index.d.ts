@@ -55,6 +55,28 @@ export interface PacSourceStatus {
 	error?: string;
 }
 
+/** Diagnostics for one effective proxy environment variable. */
+export interface EnvironmentVariableStatus {
+	/** Effective spelling, for example `https_proxy` or `HTTPS_PROXY`. */
+	variable: string;
+	/** Raw environment value. May contain credentials. */
+	value: string;
+	/** Present when the raw value cannot be used as a proxy setting. */
+	error?: string;
+}
+
+/**
+ * Supported proxy environment variables captured when the resolver was
+ * constructed. Unset variables are omitted. Windows matches names
+ * case-insensitively; Unix prefers lowercase names over uppercase aliases.
+ */
+export interface EnvironmentProxyConfig {
+	httpProxy?: EnvironmentVariableStatus;
+	httpsProxy?: EnvironmentVariableStatus;
+	allProxy?: EnvironmentVariableStatus;
+	noProxy?: EnvironmentVariableStatus;
+}
+
 /** Normalized static proxy settings read from the operating system. */
 export interface StaticProxyRules {
 	/** Proxy for HTTP and WebSocket requests. */
@@ -96,6 +118,8 @@ export type PlatformProxyConfig = WindowsProxyConfig | MacosProxyConfig | LinuxP
 
 /** A snapshot of the current operating-system proxy configuration. */
 export interface ProxyConfig {
+	/** Captured `http_proxy`, `https_proxy`, `all_proxy`, and `no_proxy` settings. */
+	environment: EnvironmentProxyConfig;
 	/** Whether the operating system requested automatic proxy discovery. */
 	autoDetect: boolean;
 	/** The configured PAC URL, even if the script could not be loaded. */
@@ -140,10 +164,10 @@ export declare class ProxyResolver {
 	/**
 	 * Reads the operating-system proxy configuration without evaluating PAC.
 	 *
-	 * Proxy environment variables are not included. DHCP WPAD, DNS WPAD, and the
-	 * configured PAC URL are inspected independently. {@link ProxyConfig.pac}
-	 * contains the first available script by precedence (DHCP before DNS on
-	 * Windows, then configured PAC).
+	 * Includes proxy environment variables captured when this resolver was
+	 * constructed. DHCP WPAD, DNS WPAD, and the configured PAC URL are inspected
+	 * independently. {@link ProxyConfig.pac} contains the first available script
+	 * by precedence (DHCP before DNS on Windows, then configured PAC).
 	 * Potentially blocking OS, DNS, and network work runs outside the JavaScript
 	 * event loop.
 	 */
@@ -195,7 +219,7 @@ export declare class ProxyResolver {
 export declare function resolveProxy(url: string): Promise<Proxy[]>;
 
 /**
- * Reads the operating-system proxy configuration using a process-wide
- * {@link ProxyResolver}. PAC scripts are loaded but never evaluated.
+ * Reads proxy environment and operating-system configuration using a
+ * process-wide {@link ProxyResolver}. PAC scripts are loaded but never evaluated.
  */
 export declare function readProxyConfig(): Promise<ProxyConfig>;

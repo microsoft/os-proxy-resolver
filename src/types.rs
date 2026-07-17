@@ -7,13 +7,15 @@ use std::fmt;
 
 /// A snapshot of the proxy configuration read from the operating system.
 ///
-/// This API does not consider proxy environment variables and never evaluates
-/// a PAC script. When auto-detection is enabled, WPAD discovery is attempted
-/// before the explicitly configured PAC URL (DHCP before DNS on Windows),
-/// matching proxy resolution precedence.
+/// This API never evaluates a PAC script. It includes proxy environment
+/// variables captured at resolver construction and dynamically reads the OS
+/// configuration. When auto-detection is enabled, WPAD discovery is attempted
+/// before the explicitly configured PAC URL (DHCP before DNS on Windows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProxyConfig {
+    /// Proxy environment variables captured when the resolver was constructed.
+    pub environment: EnvironmentProxyConfig,
     /// Whether the operating system requested automatic proxy discovery.
     pub auto_detect: bool,
     /// The explicit PAC URL configured by the operating system, whether or not
@@ -32,6 +34,28 @@ pub struct ProxyConfig {
     pub static_rules: Option<StaticProxyRules>,
     /// Source-specific settings retained where the platform exposes them.
     pub platform: Option<PlatformProxyConfig>,
+}
+
+/// Effective proxy environment variables. Unix prefers lowercase names over
+/// uppercase aliases; Windows matches names case-insensitively.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct EnvironmentProxyConfig {
+    pub http_proxy: Option<EnvironmentVariableStatus>,
+    pub https_proxy: Option<EnvironmentVariableStatus>,
+    pub all_proxy: Option<EnvironmentVariableStatus>,
+    pub no_proxy: Option<EnvironmentVariableStatus>,
+}
+
+/// Diagnostic status for one supported proxy environment variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EnvironmentVariableStatus {
+    /// Effective variable spelling, for example `https_proxy` or `HTTPS_PROXY`.
+    pub variable: String,
+    /// Raw environment value. Proxy values may contain credentials.
+    pub value: String,
+    pub error: Option<String>,
 }
 
 /// Diagnostic status for one possible PAC source.
