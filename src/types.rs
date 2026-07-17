@@ -7,13 +7,15 @@ use std::fmt;
 
 /// A snapshot of the proxy configuration read from the operating system.
 ///
-/// This API does not consider proxy environment variables and never evaluates
-/// a PAC script. When auto-detection is enabled, DNS WPAD discovery is
-/// attempted before the explicitly configured PAC URL, matching proxy
-/// resolution precedence.
+/// This API never evaluates a PAC script. It includes proxy environment
+/// variables captured at resolver construction and dynamically reads the OS
+/// configuration. When auto-detection is enabled, WPAD discovery is attempted
+/// before the explicitly configured PAC URL (DHCP before DNS on Windows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProxyConfig {
+    /// Proxy environment variables captured when the resolver was constructed.
+    pub environment: EnvironmentProxyConfig,
     /// Whether the operating system requested automatic proxy discovery.
     pub auto_detect: bool,
     /// The explicit PAC URL configured by the operating system, whether or not
@@ -22,13 +24,82 @@ pub struct ProxyConfig {
     /// The first PAC script available by resolution precedence, if one could
     /// be discovered or loaded.
     pub pac: Option<PacScript>,
+    /// DHCP WPAD inspection result.
+    pub wpad_dhcp: PacSourceStatus,
+    /// DNS WPAD inspection result.
+    pub wpad_dns: PacSourceStatus,
+    /// Explicitly configured PAC inspection result.
+    pub configured_pac: PacSourceStatus,
     /// Normalized static proxy settings, if configured.
     pub static_rules: Option<StaticProxyRules>,
     /// Source-specific settings retained where the platform exposes them.
     pub platform: Option<PlatformProxyConfig>,
 }
 
-/// A PAC script loaded from an operating-system setting or DNS WPAD.
+/// Effective proxy environment variables. Unix prefers lowercase names over
+/// uppercase aliases; Windows matches names case-insensitively.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct EnvironmentProxyConfig {
+    pub http_proxy: Option<EnvironmentVariableStatus>,
+    pub https_proxy: Option<EnvironmentVariableStatus>,
+    pub all_proxy: Option<EnvironmentVariableStatus>,
+    pub no_proxy: Option<EnvironmentVariableStatus>,
+}
+
+/// Diagnostic status for one supported proxy environment variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EnvironmentVariableStatus {
+    /// Effective variable spelling, for example `https_proxy` or `HTTPS_PROXY`.
+    pub variable: String,
+    /// Raw environment value. Proxy values may contain credentials.
+    pub value: String,
+    pub error: Option<String>,
+}
+
+/// Diagnostic status for one possible PAC source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PacSourceStatus {
+    pub state: PacSourceState,
+    /// Discovered or configured URL, when known.
+    pub url: Option<String>,
+    /// Discovery or download error detail. May contain platform/network data.
+    pub error: Option<String>,
+}
+
+impl PacSourceStatus {
+    pub(crate) fn new(state: PacSourceState) -> Self {
+        Self {
+            state,
+            url: None,
+            error: None,
+        }
+    }
+}
+
+/// Outcome of inspecting a possible PAC source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PacSourceState {
+    /// The source is supported but disabled by OS configuration.
+    Disabled,
+    /// The platform does not support inspecting this source.
+    Unsupported,
+    /// No explicit PAC URL is configured.
+    Unconfigured,
+    /// Discovery completed without finding a PAC URL.
+    NotFound,
+    /// A usable PAC script was loaded.
+    Available,
+    /// Discovery failed before a PAC URL was available.
+    ErrorDiscovery,
+    /// A known PAC URL could not be downloaded or did not contain a PAC script.
+    ErrorDownload,
+}
+
+/// A PAC script loaded from an operating-system setting or WPAD.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PacScript {
@@ -45,7 +116,9 @@ pub struct PacScript {
 #[non_exhaustive]
 pub enum PacScriptSource {
     /// Found through DNS WPAD (`http://wpad.<domain>/wpad.dat`).
-    Wpad,
+    WpadDns,
+    /// Found through DHCP WPAD (option 252).
+    WpadDhcp,
     /// Loaded from the explicit PAC URL configured by the operating system.
     Configured,
 }

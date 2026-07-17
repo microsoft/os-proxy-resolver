@@ -10,7 +10,9 @@
 //! fall-through to the OS config.
 
 use crate::bypass::BypassRules;
-use crate::types::{with_default_port, ProxyKind};
+use crate::types::{
+    with_default_port, EnvironmentProxyConfig, EnvironmentVariableStatus, ProxyKind,
+};
 use url::Url;
 
 #[derive(Debug, Default, Clone)]
@@ -19,27 +21,40 @@ pub(crate) struct EnvConfig {
     https: Option<ProxyKind>,
     all: Option<ProxyKind>,
     no_proxy: BypassRules,
+    diagnostics: EnvironmentProxyConfig,
 }
 
 impl EnvConfig {
     pub fn from_env() -> Self {
-        Self::from_lookup(|name| {
-            std::env::var(name.to_ascii_lowercase())
-                .or_else(|_| std::env::var(name.to_ascii_uppercase()))
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
+        Self::from_named_lookup(lookup_environment_variable)
     }
 
+    #[cfg(test)]
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        Self::from_named_lookup(|name| get(name).map(|value| (name.to_string(), value)))
+    }
+
+    fn from_named_lookup(get: impl Fn(&str) -> Option<(String, String)>) -> Self {
+        let (http, http_status) = inspect_proxy(get("http_proxy"));
+        let (https, https_status) = inspect_proxy(get("https_proxy"));
+        let (all, all_status) = inspect_proxy(get("all_proxy"));
+        let (no_proxy, no_proxy_status) = inspect_no_proxy(get("no_proxy"));
         EnvConfig {
-            http: get("http_proxy").as_deref().and_then(parse_proxy_value),
-            https: get("https_proxy").as_deref().and_then(parse_proxy_value),
-            all: get("all_proxy").as_deref().and_then(parse_proxy_value),
-            no_proxy: get("no_proxy")
-                .map(|v| BypassRules::parse([v.as_str()]))
-                .unwrap_or_default(),
+            http,
+            https,
+            all,
+            no_proxy,
+            diagnostics: EnvironmentProxyConfig {
+                http_proxy: http_status,
+                https_proxy: https_status,
+                all_proxy: all_status,
+                no_proxy: no_proxy_status,
+            },
         }
+    }
+
+    pub fn diagnostics(&self) -> EnvironmentProxyConfig {
+        self.diagnostics.clone()
     }
 
     /// `None` when the environment does not configure a proxy for this URL's
@@ -58,6 +73,74 @@ impl EnvConfig {
         }
         Some(vec![proxy.clone()])
     }
+}
+
+#[cfg(windows)]
+fn lookup_environment_variable(name: &str) -> Option<(String, String)> {
+    std::env::vars_os().find_map(|(key, value)| {
+        let key = key.into_string().ok()?;
+        if key.eq_ignore_ascii_case(name) {
+            value.into_string().ok().map(|value| (key, value))
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(not(windows))]
+fn lookup_environment_variable(name: &str) -> Option<(String, String)> {
+    let lowercase = name.to_ascii_lowercase();
+    let uppercase = name.to_ascii_uppercase();
+    std::env::var(&lowercase)
+        .ok()
+        .map(|value| (lowercase, value))
+        .or_else(|| {
+            std::env::var(&uppercase)
+                .ok()
+                .map(|value| (uppercase, value))
+        })
+}
+
+fn inspect_proxy(
+    setting: Option<(String, String)>,
+) -> (Option<ProxyKind>, Option<EnvironmentVariableStatus>) {
+    let Some((variable, value)) = setting else {
+        return (None, None);
+    };
+    let Some(proxy) = parse_proxy_value(&value) else {
+        return (
+            None,
+            Some(EnvironmentVariableStatus {
+                variable,
+                value,
+                error: Some("proxy value is empty or has no host".into()),
+            }),
+        );
+    };
+    (
+        Some(proxy),
+        Some(EnvironmentVariableStatus {
+            variable,
+            value,
+            error: None,
+        }),
+    )
+}
+
+fn inspect_no_proxy(
+    setting: Option<(String, String)>,
+) -> (BypassRules, Option<EnvironmentVariableStatus>) {
+    let Some((variable, value)) = setting else {
+        return (BypassRules::default(), None);
+    };
+    (
+        BypassRules::parse([value.as_str()]),
+        Some(EnvironmentVariableStatus {
+            variable,
+            value,
+            error: None,
+        }),
+    )
 }
 
 /// Parse an env proxy value: `http://host:port`, `socks5://host:port`, or a
@@ -175,5 +258,29 @@ mod tests {
             Some(ProxyKind::Http("https://h:443".into()))
         );
         assert_eq!(parse_proxy_value("  "), None);
+    }
+
+    #[test]
+    fn diagnostics_capture_effective_variables_and_raw_values() {
+        let config = EnvConfig::from_named_lookup(|name| match name {
+            "http_proxy" => Some(("HTTP_PROXY".into(), "http://user:secret@proxy:8080".into())),
+            "https_proxy" => Some(("https_proxy".into(), "   ".into())),
+            "no_proxy" => Some(("NO_PROXY".into(), "localhost,.internal".into())),
+            _ => None,
+        });
+        let diagnostics = config.diagnostics();
+        assert_eq!(
+            diagnostics.http_proxy,
+            Some(EnvironmentVariableStatus {
+                variable: "HTTP_PROXY".into(),
+                value: "http://user:secret@proxy:8080".into(),
+                error: None,
+            })
+        );
+        assert!(diagnostics.https_proxy.as_ref().unwrap().error.is_some());
+        let no_proxy = diagnostics.no_proxy.as_ref().unwrap();
+        assert_eq!(no_proxy.variable, "NO_PROXY");
+        assert_eq!(no_proxy.value, "localhost,.internal");
+        assert!(diagnostics.all_proxy.is_none());
     }
 }

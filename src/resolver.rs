@@ -10,8 +10,8 @@ use crate::env_cfg::EnvConfig;
 use crate::notify::{Notifier, Subscription};
 use crate::platform::{self, OsProxyConfig};
 use crate::types::{
-    Error, PacBackendKind, PacScript, PacScriptSource, ProxyConfig, ProxyKind, Result,
-    StaticProxyRules,
+    Error, PacBackendKind, PacScript, PacScriptSource, PacSourceState, PacSourceStatus,
+    ProxyConfig, ProxyKind, Result, StaticProxyRules,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -192,6 +192,42 @@ struct WpadCache {
     at: Instant,
     /// `None` = no WPAD on this network (negative-cached).
     script: Option<Arc<str>>,
+}
+
+struct PacInspection {
+    pac: Option<PacScript>,
+    status: PacSourceStatus,
+}
+
+impl PacInspection {
+    fn state(state: PacSourceState) -> Self {
+        Self {
+            pac: None,
+            status: PacSourceStatus::new(state),
+        }
+    }
+
+    fn available(pac: PacScript) -> Self {
+        Self {
+            status: PacSourceStatus {
+                state: PacSourceState::Available,
+                url: Some(pac.url.clone()),
+                error: None,
+            },
+            pac: Some(pac),
+        }
+    }
+
+    fn error(state: PacSourceState, url: Option<String>, error: String) -> Self {
+        Self {
+            pac: None,
+            status: PacSourceStatus {
+                state,
+                url,
+                error: Some(error),
+            },
+        }
+    }
 }
 
 #[cfg(feature = "tokio")]
@@ -482,23 +518,16 @@ impl ProxyResolver {
 
     /// Read the current proxy configuration from the operating system.
     ///
-    /// When automatic discovery is enabled, this performs DNS WPAD discovery
-    /// and loads the first usable `wpad.dat`. If discovery finds nothing, the
-    /// explicitly configured PAC URL is loaded instead. The returned PAC
-    /// source is never evaluated. Proxy environment variables are not part of
-    /// this operating-system snapshot.
+    /// Includes captured proxy environment variables and independently inspects
+    /// DHCP WPAD, DNS WPAD, and the configured PAC, including failures. `pac`
+    /// is the first available script by precedence (DHCP, DNS, configured) and
+    /// is never evaluated.
     pub fn read_proxy_config(&self) -> ProxyConfig {
         let config = self.os_config();
-        self.read_proxy_config_with(
-            config,
-            || {
-                crate::wpad::discover(
-                    self.inner.options.wpad_dns_timeout,
-                    self.inner.options.wpad_fetch_timeout,
-                )
-            },
-            |url| crate::fetch::fetch_pac(url, self.inner.options.pac_fetch_timeout),
-        )
+        let wpad_dhcp = self.inspect_dhcp_wpad(config.auto_detect);
+        let wpad_dns = self.inspect_dns_wpad(config.auto_detect);
+        let configured_pac = self.inspect_configured_pac(config.pac_url.as_deref());
+        self.build_proxy_config(config, wpad_dhcp, wpad_dns, configured_pac)
     }
 
     /// Resolve the ordered proxy list without blocking an async-runtime worker.
@@ -723,46 +752,124 @@ impl ProxyResolver {
         );
     }
 
-    fn read_proxy_config_with(
+    fn build_proxy_config(
         &self,
         config: OsProxyConfig,
-        discover_wpad: impl FnOnce() -> Option<crate::wpad::DiscoveredPac>,
-        fetch_configured: impl FnOnce(&str) -> Result<String>,
+        wpad_dhcp: PacInspection,
+        wpad_dns: PacInspection,
+        configured_pac: PacInspection,
     ) -> ProxyConfig {
-        let pac = if config.auto_detect {
-            discover_wpad().map(|discovered| PacScript {
-                url: discovered.url,
-                content: discovered.content,
-                source: PacScriptSource::Wpad,
-            })
-        } else {
-            None
-        }
-        .or_else(|| {
-            let url = config.pac_url.as_deref()?;
-            match fetch_configured(url) {
-                Ok(content) => Some(PacScript {
-                    url: url.to_string(),
-                    content,
-                    source: PacScriptSource::Configured,
-                }),
-                Err(error) => {
-                    log::warn!("{error}");
-                    None
-                }
-            }
-        });
+        let PacInspection {
+            pac: dhcp_pac,
+            status: wpad_dhcp,
+        } = wpad_dhcp;
+        let PacInspection {
+            pac: dns_pac,
+            status: wpad_dns,
+        } = wpad_dns;
+        let PacInspection {
+            pac: configured,
+            status: configured_pac,
+        } = configured_pac;
+        let pac = dhcp_pac.or(dns_pac).or(configured);
         let static_rules = config.static_rules.as_ref().map(|rules| StaticProxyRules {
             http: rules.http.clone(),
             https: rules.https.clone(),
             socks: rules.socks.clone(),
         });
         ProxyConfig {
+            environment: self.inner.env.diagnostics(),
             auto_detect: config.auto_detect,
             pac_url: config.pac_url,
             pac,
+            wpad_dhcp,
+            wpad_dns,
+            configured_pac,
             static_rules,
             platform: config.platform,
+        }
+    }
+
+    fn inspect_dhcp_wpad(&self, enabled: bool) -> PacInspection {
+        #[cfg(not(windows))]
+        {
+            let _ = enabled;
+            PacInspection::state(PacSourceState::Unsupported)
+        }
+        #[cfg(windows)]
+        {
+            if !enabled {
+                return PacInspection::state(PacSourceState::Disabled);
+            }
+            let url = match platform::detect_dhcp_wpad_url() {
+                Ok(Some(url)) => url,
+                Ok(None) => return PacInspection::state(PacSourceState::NotFound),
+                Err(error) => {
+                    return PacInspection::error(PacSourceState::ErrorDiscovery, None, error)
+                }
+            };
+            match crate::fetch::fetch_pac(&url, self.inner.options.wpad_fetch_timeout) {
+                Ok(content) if content.contains("FindProxyForURL") => {
+                    PacInspection::available(PacScript {
+                        url,
+                        content,
+                        source: PacScriptSource::WpadDhcp,
+                    })
+                }
+                Ok(_) => PacInspection::error(
+                    PacSourceState::ErrorDownload,
+                    Some(url.clone()),
+                    format!("{url} does not look like a PAC script"),
+                ),
+                Err(error) => PacInspection::error(
+                    PacSourceState::ErrorDownload,
+                    Some(url),
+                    error.to_string(),
+                ),
+            }
+        }
+    }
+
+    fn inspect_dns_wpad(&self, enabled: bool) -> PacInspection {
+        if !enabled {
+            return PacInspection::state(PacSourceState::Disabled);
+        }
+        let (pac, status) = crate::wpad::inspect(
+            self.inner.options.wpad_dns_timeout,
+            self.inner.options.wpad_fetch_timeout,
+        );
+        PacInspection {
+            pac: pac.map(|pac| PacScript {
+                url: pac.url,
+                content: pac.content,
+                source: pac.source,
+            }),
+            status,
+        }
+    }
+
+    fn inspect_configured_pac(&self, url: Option<&str>) -> PacInspection {
+        let Some(url) = url else {
+            return PacInspection::state(PacSourceState::Unconfigured);
+        };
+        match crate::fetch::fetch_pac(url, self.inner.options.pac_fetch_timeout) {
+            Ok(content) if content.contains("FindProxyForURL") => {
+                PacInspection::available(PacScript {
+                    url: url.to_string(),
+                    content,
+                    source: PacScriptSource::Configured,
+                })
+            }
+            Ok(_) => PacInspection::error(
+                PacSourceState::ErrorDownload,
+                Some(url.to_string()),
+                format!("{url} does not look like a PAC script"),
+            ),
+            Err(error) => PacInspection::error(
+                PacSourceState::ErrorDownload,
+                Some(url.to_string()),
+                error.to_string(),
+            ),
         }
     }
 
@@ -940,11 +1047,9 @@ impl ProxyResolver {
                 c.generation == generation && c.at.elapsed() < ttl
             });
             if !valid {
-                let script = crate::wpad::discover(
-                    self.inner.options.wpad_dns_timeout,
-                    self.inner.options.wpad_fetch_timeout,
-                )
-                .map(|pac| Arc::<str>::from(pac.content));
+                let script = self
+                    .discover_wpad()
+                    .map(|pac| Arc::<str>::from(pac.content));
                 *cache = Some(WpadCache {
                     generation,
                     at: Instant::now(),
@@ -954,6 +1059,37 @@ impl ProxyResolver {
             cache.as_ref().and_then(|c| c.script.clone())?
         };
         self.eval_for_resolution(&script, url)
+    }
+
+    #[cfg(any(
+        not(windows),
+        feature = "pac-engine",
+        feature = "pac-engine-wasmtime",
+        feature = "pac-engine-wasmtime-jit",
+        feature = "pac-engine-wasm2c"
+    ))]
+    fn discover_wpad(&self) -> Option<crate::wpad::DiscoveredPac> {
+        #[cfg(windows)]
+        if let Ok(Some(url)) = platform::detect_dhcp_wpad_url() {
+            match crate::fetch::fetch_pac(&url, self.inner.options.wpad_fetch_timeout) {
+                Ok(content) if content.contains("FindProxyForURL") => {
+                    log::info!("WPAD: using DHCP URL {url}");
+                    return Some(crate::wpad::DiscoveredPac {
+                        url,
+                        content,
+                        source: PacScriptSource::WpadDhcp,
+                    });
+                }
+                Ok(_) => log::warn!("WPAD: DHCP URL {url} does not look like a PAC script"),
+                Err(error) => log::debug!("WPAD: {error}"),
+            }
+        }
+
+        crate::wpad::inspect(
+            self.inner.options.wpad_dns_timeout,
+            self.inner.options.wpad_fetch_timeout,
+        )
+        .0
     }
 
     /// Best-effort local IP for PAC `myIpAddress()`, so the engine doesn't
@@ -1191,24 +1327,24 @@ mod tests {
             }),
             ..Default::default()
         };
-        let snapshot = resolver.read_proxy_config_with(
+        let dns_pac = PacScript {
+            url: "http://wpad.example/wpad.dat".into(),
+            content: "function FindProxyForURL() { return 'DIRECT'; }".into(),
+            source: PacScriptSource::WpadDns,
+        };
+        let configured_pac = PacScript {
+            url: "https://configured.example/proxy.pac".into(),
+            content: "configured script".into(),
+            source: PacScriptSource::Configured,
+        };
+        let snapshot = resolver.build_proxy_config(
             config,
-            || {
-                Some(crate::wpad::DiscoveredPac {
-                    url: "http://wpad.example/wpad.dat".into(),
-                    content: "function FindProxyForURL() { return 'DIRECT'; }".into(),
-                })
-            },
-            |_| panic!("configured PAC must not load when WPAD succeeds"),
+            PacInspection::state(PacSourceState::NotFound),
+            PacInspection::available(dns_pac.clone()),
+            PacInspection::available(configured_pac),
         );
-        assert_eq!(
-            snapshot.pac,
-            Some(PacScript {
-                url: "http://wpad.example/wpad.dat".into(),
-                content: "function FindProxyForURL() { return 'DIRECT'; }".into(),
-                source: PacScriptSource::Wpad,
-            })
-        );
+        assert_eq!(snapshot.pac, Some(dns_pac));
+        assert_eq!(snapshot.configured_pac.state, PacSourceState::Available);
         assert_eq!(
             snapshot.static_rules.unwrap().http,
             Some(ProxyKind::Http("proxy.example:8080".into()))
@@ -1224,6 +1360,26 @@ mod tests {
     }
 
     #[test]
+    fn proxy_config_preserves_dhcp_wpad_source() {
+        let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+        let snapshot = resolver.build_proxy_config(
+            OsProxyConfig {
+                auto_detect: true,
+                ..Default::default()
+            },
+            PacInspection::available(PacScript {
+                url: "http://dhcp.example/proxy.pac".into(),
+                content: "function FindProxyForURL() { return 'DIRECT'; }".into(),
+                source: PacScriptSource::WpadDhcp,
+            }),
+            PacInspection::state(PacSourceState::NotFound),
+            PacInspection::state(PacSourceState::Unconfigured),
+        );
+
+        assert_eq!(snapshot.pac.unwrap().source, PacScriptSource::WpadDhcp);
+    }
+
+    #[test]
     fn proxy_config_loads_configured_pac_after_wpad_miss() {
         let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
         let config = OsProxyConfig {
@@ -1231,22 +1387,50 @@ mod tests {
             pac_url: Some("https://configured.example/proxy.pac".into()),
             ..Default::default()
         };
-        let snapshot = resolver.read_proxy_config_with(
+        let configured_pac = PacScript {
+            url: "https://configured.example/proxy.pac".into(),
+            content: "configured script".into(),
+            source: PacScriptSource::Configured,
+        };
+        let snapshot = resolver.build_proxy_config(
             config,
-            || None,
-            |url| {
-                assert_eq!(url, "https://configured.example/proxy.pac");
-                Ok("configured script".into())
-            },
+            PacInspection::state(PacSourceState::NotFound),
+            PacInspection::state(PacSourceState::NotFound),
+            PacInspection::available(configured_pac.clone()),
         );
+        assert_eq!(snapshot.pac, Some(configured_pac));
+    }
+
+    #[test]
+    fn configured_pac_reports_download_error() {
+        let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+        let inspection = resolver.inspect_configured_pac(Some("file:///nonexistent/proxy.pac"));
+        assert_eq!(inspection.status.state, PacSourceState::ErrorDownload);
         assert_eq!(
-            snapshot.pac,
-            Some(PacScript {
-                url: "https://configured.example/proxy.pac".into(),
-                content: "configured script".into(),
-                source: PacScriptSource::Configured,
-            })
+            inspection.status.url.as_deref(),
+            Some("file:///nonexistent/proxy.pac")
         );
+        assert!(inspection.status.error.is_some());
+    }
+
+    #[test]
+    fn configured_pac_rejects_non_pac_content() {
+        let dir = std::env::temp_dir().join("os-proxy-resolver-configured-pac-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("invalid.pac");
+        std::fs::write(&path, "<html>not a PAC script</html>").unwrap();
+        let url = url::Url::from_file_path(&path).unwrap();
+        let resolver = ProxyResolver::with_env(ResolverOptions::default(), env(&[]));
+
+        let inspection = resolver.inspect_configured_pac(Some(url.as_str()));
+
+        assert!(inspection.pac.is_none());
+        assert_eq!(inspection.status.state, PacSourceState::ErrorDownload);
+        assert!(inspection
+            .status
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("does not look like a PAC script")));
     }
 
     #[cfg(feature = "tokio")]

@@ -26,11 +26,22 @@ async function main() {
 	assert.strictEqual(typeof resolver.readProxyConfig, 'function');
 	assert.strictEqual(typeof resolver.configGeneration, 'number');
 	const config = await resolver.readProxyConfig();
+	for (const status of Object.values(config.environment)) {
+		assert.strictEqual(typeof status.variable, 'string');
+		assert.strictEqual(typeof status.value, 'string');
+	}
 	assert.strictEqual(typeof config.autoDetect, 'boolean');
+	for (const status of [config.wpadDhcp, config.wpadDns, config.configuredPac]) {
+		assert.strictEqual(typeof status.state, 'string');
+		assert.ok([
+			'disabled', 'unsupported', 'unconfigured', 'not-found', 'available',
+			'error-discovery', 'error-download', 'unknown',
+		].includes(status.state));
+	}
 	if (config.pac) {
 		assert.strictEqual(typeof config.pac.url, 'string');
 		assert.strictEqual(typeof config.pac.content, 'string');
-		assert.ok(['wpad', 'configured', 'unknown'].includes(config.pac.source));
+		assert.ok(['wpad-dns', 'wpad-dhcp', 'configured', 'unknown'].includes(config.pac.source));
 	}
 	if (config.platform) {
 		assert.ok(['windows', 'macos', 'linux', 'unknown'].includes(config.platform.kind));

@@ -12,7 +12,8 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Error, JsFunction, JsUnknown, Result, Status};
 use napi_derive::napi;
 use os_proxy_resolver::{
-    PacScriptSource, PlatformProxyConfig, ProxyKind, StaticProxyRules, Subscription,
+    EnvironmentProxyConfig, EnvironmentVariableStatus, PacScriptSource, PacSourceState,
+    PacSourceStatus, PlatformProxyConfig, ProxyKind, StaticProxyRules, Subscription,
 };
 
 #[napi(object)]
@@ -69,6 +70,69 @@ pub struct NodePacScript {
     pub url: String,
     pub content: String,
     pub source: String,
+}
+
+#[napi(object)]
+pub struct NodePacSourceStatus {
+    pub state: String,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
+impl From<PacSourceStatus> for NodePacSourceStatus {
+    fn from(status: PacSourceStatus) -> Self {
+        Self {
+            state: match status.state {
+                PacSourceState::Disabled => "disabled",
+                PacSourceState::Unsupported => "unsupported",
+                PacSourceState::Unconfigured => "unconfigured",
+                PacSourceState::NotFound => "not-found",
+                PacSourceState::Available => "available",
+                PacSourceState::ErrorDiscovery => "error-discovery",
+                PacSourceState::ErrorDownload => "error-download",
+                _ => "unknown",
+            }
+            .into(),
+            url: status.url,
+            error: status.error,
+        }
+    }
+}
+
+#[napi(object)]
+pub struct NodeEnvironmentVariableStatus {
+    pub variable: String,
+    pub value: String,
+    pub error: Option<String>,
+}
+
+impl From<EnvironmentVariableStatus> for NodeEnvironmentVariableStatus {
+    fn from(status: EnvironmentVariableStatus) -> Self {
+        Self {
+            variable: status.variable,
+            value: status.value,
+            error: status.error,
+        }
+    }
+}
+
+#[napi(object)]
+pub struct NodeEnvironmentProxyConfig {
+    pub http_proxy: Option<NodeEnvironmentVariableStatus>,
+    pub https_proxy: Option<NodeEnvironmentVariableStatus>,
+    pub all_proxy: Option<NodeEnvironmentVariableStatus>,
+    pub no_proxy: Option<NodeEnvironmentVariableStatus>,
+}
+
+impl From<EnvironmentProxyConfig> for NodeEnvironmentProxyConfig {
+    fn from(config: EnvironmentProxyConfig) -> Self {
+        Self {
+            http_proxy: config.http_proxy.map(Into::into),
+            https_proxy: config.https_proxy.map(Into::into),
+            all_proxy: config.all_proxy.map(Into::into),
+            no_proxy: config.no_proxy.map(Into::into),
+        }
+    }
 }
 
 #[napi(object)]
@@ -144,9 +208,13 @@ impl From<PlatformProxyConfig> for NodePlatformProxyConfig {
 
 #[napi(object)]
 pub struct NodeProxyConfig {
+    pub environment: NodeEnvironmentProxyConfig,
     pub auto_detect: bool,
     pub pac_url: Option<String>,
     pub pac: Option<NodePacScript>,
+    pub wpad_dhcp: NodePacSourceStatus,
+    pub wpad_dns: NodePacSourceStatus,
+    pub configured_pac: NodePacSourceStatus,
     pub static_rules: Option<NodeStaticProxyRules>,
     pub platform: Option<NodePlatformProxyConfig>,
 }
@@ -154,18 +222,23 @@ pub struct NodeProxyConfig {
 impl From<os_proxy_resolver::ProxyConfig> for NodeProxyConfig {
     fn from(config: os_proxy_resolver::ProxyConfig) -> Self {
         Self {
+            environment: config.environment.into(),
             auto_detect: config.auto_detect,
             pac_url: config.pac_url,
             pac: config.pac.map(|pac| NodePacScript {
                 url: pac.url,
                 content: pac.content,
                 source: match pac.source {
-                    PacScriptSource::Wpad => "wpad",
+                    PacScriptSource::WpadDns => "wpad-dns",
+                    PacScriptSource::WpadDhcp => "wpad-dhcp",
                     PacScriptSource::Configured => "configured",
                     _ => "unknown",
                 }
                 .into(),
             }),
+            wpad_dhcp: config.wpad_dhcp.into(),
+            wpad_dns: config.wpad_dns.into(),
+            configured_pac: config.configured_pac.into(),
             static_rules: config.static_rules.map(NodeStaticProxyRules::from),
             platform: config.platform.map(NodePlatformProxyConfig::from),
         }

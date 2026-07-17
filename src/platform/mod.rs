@@ -26,6 +26,8 @@ mod imp;
 #[path = "windows.rs"]
 mod imp;
 
+#[cfg(windows)]
+pub(crate) use imp::detect_dhcp_wpad_url;
 #[cfg(all(
     windows,
     not(any(
