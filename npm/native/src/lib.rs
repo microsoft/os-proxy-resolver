@@ -12,7 +12,8 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Env, Error, JsFunction, JsUnknown, Result, Status};
 use napi_derive::napi;
 use os_proxy_resolver::{
-    PacScriptSource, PlatformProxyConfig, ProxyKind, StaticProxyRules, Subscription,
+    PacScriptSource, PacSourceState, PacSourceStatus, PlatformProxyConfig, ProxyKind,
+    StaticProxyRules, Subscription,
 };
 
 #[napi(object)]
@@ -69,6 +70,33 @@ pub struct NodePacScript {
     pub url: String,
     pub content: String,
     pub source: String,
+}
+
+#[napi(object)]
+pub struct NodePacSourceStatus {
+    pub state: String,
+    pub url: Option<String>,
+    pub error: Option<String>,
+}
+
+impl From<PacSourceStatus> for NodePacSourceStatus {
+    fn from(status: PacSourceStatus) -> Self {
+        Self {
+            state: match status.state {
+                PacSourceState::Disabled => "disabled",
+                PacSourceState::Unsupported => "unsupported",
+                PacSourceState::Unconfigured => "unconfigured",
+                PacSourceState::NotFound => "not-found",
+                PacSourceState::Available => "available",
+                PacSourceState::ErrorDiscovery => "error-discovery",
+                PacSourceState::ErrorDownload => "error-download",
+                _ => "unknown",
+            }
+            .into(),
+            url: status.url,
+            error: status.error,
+        }
+    }
 }
 
 #[napi(object)]
@@ -147,6 +175,9 @@ pub struct NodeProxyConfig {
     pub auto_detect: bool,
     pub pac_url: Option<String>,
     pub pac: Option<NodePacScript>,
+    pub wpad_dhcp: NodePacSourceStatus,
+    pub wpad_dns: NodePacSourceStatus,
+    pub configured_pac: NodePacSourceStatus,
     pub static_rules: Option<NodeStaticProxyRules>,
     pub platform: Option<NodePlatformProxyConfig>,
 }
@@ -167,6 +198,9 @@ impl From<os_proxy_resolver::ProxyConfig> for NodeProxyConfig {
                 }
                 .into(),
             }),
+            wpad_dhcp: config.wpad_dhcp.into(),
+            wpad_dns: config.wpad_dns.into(),
+            configured_pac: config.configured_pac.into(),
             static_rules: config.static_rules.map(NodeStaticProxyRules::from),
             platform: config.platform.map(NodePlatformProxyConfig::from),
         }

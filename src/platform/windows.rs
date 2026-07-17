@@ -46,7 +46,8 @@ use windows_sys::Win32::Networking::WinHttp::{
 };
 use windows_sys::Win32::Networking::WinHttp::{
     WinHttpDetectAutoProxyConfigUrl, WinHttpGetIEProxyConfigForCurrentUser,
-    WINHTTP_AUTO_DETECT_TYPE_DHCP, WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
+    ERROR_WINHTTP_AUTODETECTION_FAILED, WINHTTP_AUTO_DETECT_TYPE_DHCP,
+    WINHTTP_CURRENT_USER_IE_PROXY_CONFIG,
 };
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 use windows_sys::Win32::System::Registry::{
@@ -121,16 +122,19 @@ pub(crate) fn read_config() -> OsProxyConfig {
 /// Discover the DHCP option 252 PAC URL. WinHTTP tries DHCP before DNS when
 /// both mechanisms are requested; keeping this probe separate lets inspection
 /// report which mechanism supplied the script.
-pub(crate) fn detect_dhcp_wpad_url() -> Option<String> {
+pub(crate) fn detect_dhcp_wpad_url() -> std::result::Result<Option<String>, String> {
     let mut url = std::ptr::null_mut();
     if unsafe { WinHttpDetectAutoProxyConfigUrl(WINHTTP_AUTO_DETECT_TYPE_DHCP, &mut url) } == 0 {
-        log::debug!(
-            "WinHttpDetectAutoProxyConfigUrl(DHCP) failed: error {}",
-            unsafe { GetLastError() }
-        );
-        return None;
+        let error = unsafe { GetLastError() };
+        return if error == ERROR_WINHTTP_AUTODETECTION_FAILED {
+            Ok(None)
+        } else {
+            Err(format!(
+                "WinHttpDetectAutoProxyConfigUrl(DHCP) failed: error {error}"
+            ))
+        };
     }
-    unsafe { take_wide_string(url) }
+    Ok(unsafe { take_wide_string(url) })
 }
 
 /// Connection-specific DNS suffixes used for DNS WPAD candidate generation.

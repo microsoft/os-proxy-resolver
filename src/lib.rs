@@ -129,7 +129,8 @@ pub use notify::Subscription;
 pub use resolver::{ProxyResolver, ResolverOptions};
 pub use types::{
     Error, LinuxProxyConfig, MacosProxyConfig, PacBackendKind, PacScript, PacScriptSource,
-    PlatformProxyConfig, ProxyConfig, ProxyKind, Result, StaticProxyRules, WindowsProxyConfig,
+    PacSourceState, PacSourceStatus, PlatformProxyConfig, ProxyConfig, ProxyKind, Result,
+    StaticProxyRules, WindowsProxyConfig,
 };
 
 /// Size in bytes of the embedded ahead-of-time-compiled PAC guest module —

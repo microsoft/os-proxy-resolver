@@ -22,10 +22,57 @@ pub struct ProxyConfig {
     /// The first PAC script available by resolution precedence, if one could
     /// be discovered or loaded.
     pub pac: Option<PacScript>,
+    /// DHCP WPAD inspection result.
+    pub wpad_dhcp: PacSourceStatus,
+    /// DNS WPAD inspection result.
+    pub wpad_dns: PacSourceStatus,
+    /// Explicitly configured PAC inspection result.
+    pub configured_pac: PacSourceStatus,
     /// Normalized static proxy settings, if configured.
     pub static_rules: Option<StaticProxyRules>,
     /// Source-specific settings retained where the platform exposes them.
     pub platform: Option<PlatformProxyConfig>,
+}
+
+/// Diagnostic status for one possible PAC source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PacSourceStatus {
+    pub state: PacSourceState,
+    /// Discovered or configured URL, when known.
+    pub url: Option<String>,
+    /// Discovery or download error detail. May contain platform/network data.
+    pub error: Option<String>,
+}
+
+impl PacSourceStatus {
+    pub(crate) fn new(state: PacSourceState) -> Self {
+        Self {
+            state,
+            url: None,
+            error: None,
+        }
+    }
+}
+
+/// Outcome of inspecting a possible PAC source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PacSourceState {
+    /// The source is supported but disabled by OS configuration.
+    Disabled,
+    /// The platform does not support inspecting this source.
+    Unsupported,
+    /// No explicit PAC URL is configured.
+    Unconfigured,
+    /// Discovery completed without finding a PAC URL.
+    NotFound,
+    /// A usable PAC script was loaded.
+    Available,
+    /// Discovery failed before a PAC URL was available.
+    ErrorDiscovery,
+    /// A known PAC URL could not be downloaded or did not contain a PAC script.
+    ErrorDownload,
 }
 
 /// A PAC script loaded from an operating-system setting or WPAD.

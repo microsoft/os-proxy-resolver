@@ -186,12 +186,13 @@ if let Some(pac) = config.pac {
 The snapshot includes normalized static HTTP/HTTPS/SOCKS rules and, when the
 native source was available, source-specific settings from WinHTTP,
 SystemConfiguration, or GNOME GSettings. Proxy environment variables are not
-included. If auto-detection is enabled, the call performs WPAD discovery first
-(DHCP before DNS on Windows); if no usable `wpad.dat` is found, it loads the
-configured PAC URL. PAC loading is best-effort and synchronous, using the
-timeouts in `ResolverOptions`. The returned script includes its configured or
-discovered URL, reports `WpadDhcp` or `WpadDns`, and is never evaluated. Windows
-DNS WPAD uses adapter DNS suffixes.
+included. DHCP WPAD, DNS WPAD, and the configured PAC URL are all inspected;
+their `available`, `not-found`, `error-discovery`, or `error-download` status
+is retained with URL/error details. PAC loading is best-effort and synchronous,
+using the timeouts in `ResolverOptions`. The selected script is the first
+available by precedence (DHCP, DNS, configured), reports `WpadDhcp`, `WpadDns`,
+or `Configured`, and is never evaluated. Windows DNS WPAD uses adapter DNS
+suffixes.
 
 ## Bad-proxy feedback
 

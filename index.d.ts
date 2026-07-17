@@ -35,6 +35,26 @@ export interface PacScript {
 	source: PacScriptSource;
 }
 
+/** Result of inspecting one possible PAC source. */
+export type PacSourceState =
+	| 'disabled'
+	| 'unsupported'
+	| 'unconfigured'
+	| 'not-found'
+	| 'available'
+	| 'error-discovery'
+	| 'error-download'
+	| 'unknown';
+
+/** Diagnostics for one possible PAC source. */
+export interface PacSourceStatus {
+	state: PacSourceState;
+	/** Discovered or configured URL, when known. */
+	url?: string;
+	/** Discovery or download error detail. May contain platform/network data. */
+	error?: string;
+}
+
 /** Normalized static proxy settings read from the operating system. */
 export interface StaticProxyRules {
 	/** Proxy for HTTP and WebSocket requests. */
@@ -82,6 +102,12 @@ export interface ProxyConfig {
 	pacUrl?: string;
 	/** The first PAC script available by resolution precedence. */
 	pac?: PacScript;
+	/** DHCP WPAD status. Unsupported on non-Windows platforms. */
+	wpadDhcp: PacSourceStatus;
+	/** DNS WPAD status. */
+	wpadDns: PacSourceStatus;
+	/** Explicitly configured PAC status. */
+	configuredPac: PacSourceStatus;
 	/** Normalized static proxy settings, if configured. */
 	staticRules?: StaticProxyRules;
 	/** Raw source-specific settings, if the native source was available. */
@@ -114,9 +140,10 @@ export declare class ProxyResolver {
 	/**
 	 * Reads the operating-system proxy configuration without evaluating PAC.
 	 *
-	 * Proxy environment variables are not included. If auto-detection is
-	 * enabled, WPAD discovery runs before the configured PAC URL is loaded
-	 * (DHCP before DNS on Windows).
+	 * Proxy environment variables are not included. DHCP WPAD, DNS WPAD, and the
+	 * configured PAC URL are inspected independently. {@link ProxyConfig.pac}
+	 * contains the first available script by precedence (DHCP before DNS on
+	 * Windows, then configured PAC).
 	 * Potentially blocking OS, DNS, and network work runs outside the JavaScript
 	 * event loop.
 	 */

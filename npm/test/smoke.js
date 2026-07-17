@@ -27,6 +27,13 @@ async function main() {
 	assert.strictEqual(typeof resolver.configGeneration, 'number');
 	const config = await resolver.readProxyConfig();
 	assert.strictEqual(typeof config.autoDetect, 'boolean');
+	for (const status of [config.wpadDhcp, config.wpadDns, config.configuredPac]) {
+		assert.strictEqual(typeof status.state, 'string');
+		assert.ok([
+			'disabled', 'unsupported', 'unconfigured', 'not-found', 'available',
+			'error-discovery', 'error-download', 'unknown',
+		].includes(status.state));
+	}
 	if (config.pac) {
 		assert.strictEqual(typeof config.pac.url, 'string');
 		assert.strictEqual(typeof config.pac.content, 'string');

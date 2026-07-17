@@ -20,7 +20,7 @@
 //! fetch gets a slightly longer one, and the caller caches negative results.
 
 use crate::fetch::fetch_pac;
-use crate::types::PacScriptSource;
+use crate::types::{PacScriptSource, PacSourceState, PacSourceStatus};
 use std::net::ToSocketAddrs;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -32,48 +32,75 @@ pub(crate) struct DiscoveredPac {
     pub source: PacScriptSource,
 }
 
-/// Returns the fetched `wpad.dat` PAC script and its discovered URL, or `None`
-/// when this network has no usable DNS WPAD.
-pub(crate) fn discover(dns_timeout: Duration, fetch_timeout: Duration) -> Option<DiscoveredPac> {
-    discover_with_domains(&search_domains(), dns_timeout, fetch_timeout)
-}
-
-fn discover_with_domains(
-    domains: &[String],
+pub(crate) fn inspect(
     dns_timeout: Duration,
     fetch_timeout: Duration,
-) -> Option<DiscoveredPac> {
-    discover_with_domains_using(
-        domains,
+) -> (Option<DiscoveredPac>, PacSourceStatus) {
+    inspect_with_domains_using(
+        &search_domains(),
         |candidate| resolves(candidate, dns_timeout),
         |url| fetch_pac(url, fetch_timeout),
     )
 }
 
-fn discover_with_domains_using(
+fn inspect_with_domains_using(
     domains: &[String],
-    mut resolves: impl FnMut(&str) -> bool,
+    mut resolves: impl FnMut(&str) -> std::result::Result<bool, String>,
     mut fetch: impl FnMut(&str) -> crate::Result<String>,
-) -> Option<DiscoveredPac> {
+) -> (Option<DiscoveredPac>, PacSourceStatus) {
+    let mut error = None;
     for candidate in candidate_hosts(domains) {
-        if !resolves(&candidate) {
-            continue;
+        match resolves(&candidate) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(message) => {
+                error.get_or_insert((PacSourceState::ErrorDiscovery, None, message));
+                continue;
+            }
         }
         let url = format!("http://{candidate}/wpad.dat");
         match fetch(&url) {
             Ok(script) if script.contains("FindProxyForURL") => {
                 log::info!("WPAD: using {url}");
-                return Some(DiscoveredPac {
-                    url,
-                    content: script,
-                    source: PacScriptSource::WpadDns,
-                });
+                return (
+                    Some(DiscoveredPac {
+                        url: url.clone(),
+                        content: script,
+                        source: PacScriptSource::WpadDns,
+                    }),
+                    PacSourceStatus {
+                        state: PacSourceState::Available,
+                        url: Some(url),
+                        error: None,
+                    },
+                );
             }
-            Ok(_) => log::warn!("WPAD: {url} does not look like a PAC script, skipping"),
-            Err(e) => log::debug!("WPAD: {e}"),
+            Ok(_) => {
+                let message = format!("{url} does not look like a PAC script");
+                log::warn!("WPAD: {message}");
+                error = Some((PacSourceState::ErrorDownload, Some(url), message));
+            }
+            Err(fetch_error) => {
+                log::debug!("WPAD: {fetch_error}");
+                error = Some((
+                    PacSourceState::ErrorDownload,
+                    Some(url),
+                    fetch_error.to_string(),
+                ));
+            }
         }
     }
-    None
+    match error {
+        Some((state, url, error)) => (
+            None,
+            PacSourceStatus {
+                state,
+                url,
+                error: Some(error),
+            },
+        ),
+        None => (None, PacSourceStatus::new(PacSourceState::NotFound)),
+    }
 }
 
 /// `wpad.` candidates from the search domains, deduplicated, order-preserving.
@@ -128,17 +155,21 @@ fn search_domains() -> Vec<String> {
 /// DNS probe with a hard timeout. `ToSocketAddrs` has no timeout knob, so the
 /// lookup runs on a throwaway thread and we stop waiting after `timeout` (the
 /// thread finishes in the background; the result is discarded).
-fn resolves(host: &str, timeout: Duration) -> bool {
+fn resolves(host: &str, timeout: Duration) -> std::result::Result<bool, String> {
     let (tx, rx) = mpsc::sync_channel(1);
     let host_owned = format!("{host}:80");
-    std::thread::Builder::new()
+    let thread_started = std::thread::Builder::new()
         .name("os-proxy-wpad-dns".into())
         .spawn(move || {
             let ok = host_owned.to_socket_addrs().map(|mut a| a.next().is_some());
             let _ = tx.send(ok.unwrap_or(false));
         })
-        .is_ok()
-        && rx.recv_timeout(timeout).unwrap_or(false)
+        .is_ok();
+    if !thread_started {
+        return Err("failed to start DNS probe".into());
+    }
+    rx.recv_timeout(timeout)
+        .map_err(|error| format!("DNS probe for {host} failed: {error}"))
 }
 
 #[cfg(test)]
@@ -205,17 +236,40 @@ mod tests {
 
     #[test]
     fn returns_discovered_url_with_script() {
-        let pac = discover_with_domains_using(
+        let (pac, status) = inspect_with_domains_using(
             &["corp.example.com".into()],
-            |host| host == "wpad.corp.example.com",
+            |host| Ok(host == "wpad.corp.example.com"),
             |url| {
                 assert_eq!(url, "http://wpad.corp.example.com/wpad.dat");
                 Ok("function FindProxyForURL() { return 'DIRECT'; }".into())
             },
-        )
-        .unwrap();
+        );
+        let pac = pac.unwrap();
         assert_eq!(pac.url, "http://wpad.corp.example.com/wpad.dat");
         assert!(pac.content.contains("FindProxyForURL"));
         assert_eq!(pac.source, PacScriptSource::WpadDns);
+        assert_eq!(status.state, PacSourceState::Available);
+    }
+
+    #[test]
+    fn distinguishes_discovery_and_download_errors() {
+        let (_, discovery) = inspect_with_domains_using(
+            &["corp.example.com".into()],
+            |_| Err("DNS timed out".into()),
+            |_| panic!("fetch must not run after discovery failure"),
+        );
+        assert_eq!(discovery.state, PacSourceState::ErrorDiscovery);
+        assert_eq!(discovery.error.as_deref(), Some("DNS timed out"));
+
+        let (_, download) = inspect_with_domains_using(
+            &["corp.example.com".into()],
+            |host| Ok(host == "wpad.corp.example.com"),
+            |_| Err(crate::Error::PacFetch("connection refused".into())),
+        );
+        assert_eq!(download.state, PacSourceState::ErrorDownload);
+        assert_eq!(
+            download.url.as_deref(),
+            Some("http://wpad.corp.example.com/wpad.dat")
+        );
     }
 }
