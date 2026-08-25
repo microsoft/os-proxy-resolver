@@ -2953,7 +2953,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 MIT License
 
 Used by:
-  - os-proxy-resolver 0.1.0
+  - os-proxy-resolver 0.5.0
 
 MIT License
 

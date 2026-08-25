@@ -14,6 +14,7 @@ use crate::bypass::BypassRules;
 use crate::types::{LinuxProxyConfig, PlatformProxyConfig, ProxyKind};
 use std::sync::Arc;
 
+#[path = "gio.rs"]
 mod gio;
 pub(crate) use gio::Watcher;
 

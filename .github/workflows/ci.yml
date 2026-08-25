@@ -270,9 +270,9 @@ jobs:
             features="tokio pac-engine-wasmtime"
           fi
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            dbus-run-session -- cargo test --features "$features" os_roundtrip -- --nocapture
+            dbus-run-session -- cargo test --features "$features" platform::imp::tests::os_ -- --nocapture
           else
-            cargo test --features "$features" os_roundtrip -- --nocapture
+            cargo test --features "$features" platform::imp::tests::os_ -- --nocapture
           fi
         shell: bash
 
