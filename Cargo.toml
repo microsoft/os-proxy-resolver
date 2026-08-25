@@ -1,6 +1,6 @@
 [package]
 name = "os-proxy-resolver"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.94"
 # All first-party code is MIT (see LICENSE.txt). The embedded PAC engine links

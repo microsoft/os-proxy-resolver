@@ -6,7 +6,7 @@
 # this directory for how to regenerate it.
 [package]
 name = "pac-wasm-guest"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.94"
 license = "MIT"
