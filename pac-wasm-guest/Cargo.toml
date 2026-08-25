@@ -8,7 +8,7 @@
 name = "pac-wasm-guest"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.94"
 license = "MIT"
 publish = false
 description = "QuickJS-NG (via Javy) as a wasm32-wasip1 module for os-proxy-resolver's sandboxed PAC backend"

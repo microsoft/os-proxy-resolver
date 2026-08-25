@@ -2,7 +2,7 @@
 name = "os-proxy-resolver"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.94"
 # All first-party code is MIT (see LICENSE.txt). The embedded PAC engine links
 # the MIT-licensed quickjs-ng via the `rquickjs-sys` crate; the PAC helper
 # functions are original, implemented from the public PAC specification.
@@ -118,7 +118,7 @@ windows-sys = { version = "0.60", features = [
 rquickjs-sys = { version = "0.12.1", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = "0.2"
+libloading = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }

@@ -2,6 +2,14 @@
 
 Notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Changed
+
+- Replaced Linux `dconf` and `gsettings` subprocesses with runtime-loaded,
+  in-process GIO configuration reads and change notifications.
+- Raised the minimum supported Rust version to 1.94.
+
 ## 0.4.0
 
 ### Fixed

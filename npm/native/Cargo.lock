@@ -359,7 +359,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "core-foundation",
- "libc",
+ "libloading",
  "log",
  "psl",
  "system-configuration",

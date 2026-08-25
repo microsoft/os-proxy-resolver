@@ -3,84 +3,47 @@
  *  Licensed under the MIT License. See LICENSE.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-//! Linux: GNOME's `org.gnome.system.proxy` GSettings tree, read via one
-//! `gsettings list-recursively` invocation (recurses into the .http/.https/
-//! .socks child schemas). No GNOME (or no `gsettings` binary) means no OS
-//! config — the env-var layer above this is then the only source, which is
-//! the right default for headless boxes. KDE and proxy authentication are
-//! non-goals.
-//!
-//! Change watching: `dconf watch /system/proxy/` (recursive) when available,
-//! falling back to `gsettings monitor org.gnome.system.proxy` (top-level keys
-//! only). Both are long-running child processes whose stdout lines signal
-//! changes.
+//! Linux: GNOME's `org.gnome.system.proxy` GSettings tree, accessed in-process
+//! through GIO. The shared libraries are loaded at runtime so headless systems
+//! without GLib can still use the environment-variable layer. Change signals
+//! are dispatched on a private GLib main context thread. KDE and proxy
+//! authentication are non-goals.
 
 use super::{OsProxyConfig, StaticRules};
 use crate::bypass::BypassRules;
 use crate::types::{LinuxProxyConfig, PlatformProxyConfig, ProxyKind};
-use std::collections::HashMap;
-use std::io::{self, BufRead};
-use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
+
+mod gio;
+pub(crate) use gio::Watcher;
 
 pub(crate) fn read_config() -> OsProxyConfig {
-    let output = Command::new("gsettings")
-        .args(["list-recursively", "org.gnome.system.proxy"])
-        .stdin(Stdio::null())
-        .output();
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return OsProxyConfig::default(),
-    };
-    parse_gsettings_output(&String::from_utf8_lossy(&output.stdout))
+    gio::read_values()
+        .map(config_from_values)
+        .unwrap_or_default()
 }
 
-fn parse_gsettings_output(text: &str) -> OsProxyConfig {
-    // Lines look like: `org.gnome.system.proxy.http host 'proxy.example.com'`
-    let mut values: HashMap<(String, String), String> = HashMap::new();
-    for line in text.lines() {
-        let mut parts = line.splitn(3, char::is_whitespace);
-        if let (Some(schema), Some(key), Some(value)) = (parts.next(), parts.next(), parts.next()) {
-            values.insert(
-                (schema.to_string(), key.to_string()),
-                value.trim().to_string(),
-            );
-        }
-    }
-    let get = |schema: &str, key: &str| {
-        values
-            .get(&(format!("org.gnome.system.proxy{schema}"), key.to_string()))
-            .map(String::as_str)
-    };
-
-    let mode = get("", "mode").map(unquote).unwrap_or_default();
-    let ignore_hosts = get("", "ignore-hosts")
-        .map(parse_string_array)
-        .unwrap_or_default();
+fn config_from_values(values: gio::Values) -> OsProxyConfig {
     let mut config = OsProxyConfig {
         platform: Some(PlatformProxyConfig::Linux(LinuxProxyConfig {
-            mode: (!mode.is_empty()).then(|| mode.clone()),
-            ignore_hosts: ignore_hosts.clone(),
+            mode: (!values.mode.is_empty()).then(|| values.mode.clone()),
+            ignore_hosts: values.ignore_hosts.clone(),
         })),
         ..Default::default()
     };
-    match mode.as_str() {
+    match values.mode.as_str() {
         "auto" => {
-            config.pac_url = get("", "autoconfig-url")
-                .map(unquote)
-                .filter(|s| !s.is_empty());
+            config.pac_url = (!values.autoconfig_url.is_empty()).then_some(values.autoconfig_url);
             // GNOME semantics: "auto" with no PAC URL means WPAD.
             config.auto_detect = config.pac_url.is_none();
         }
         "manual" => {
-            let mut rules = StaticRules::default();
-            rules.http = host_port(get(".http", "host"), get(".http", "port")).map(ProxyKind::Http);
-            rules.https =
-                host_port(get(".https", "host"), get(".https", "port")).map(ProxyKind::Http);
-            rules.socks =
-                host_port(get(".socks", "host"), get(".socks", "port")).map(ProxyKind::Socks);
-            rules.bypass = BypassRules::parse(ignore_hosts.iter().map(|s| s.as_str()));
+            let rules = StaticRules {
+                http: host_port(&values.http_host, values.http_port).map(ProxyKind::Http),
+                https: host_port(&values.https_host, values.https_port).map(ProxyKind::Http),
+                socks: host_port(&values.socks_host, values.socks_port).map(ProxyKind::Socks),
+                bypass: BypassRules::parse(values.ignore_hosts.iter().map(String::as_str)),
+            };
             if !rules.is_empty() {
                 config.static_rules = Some(rules);
             }
@@ -90,227 +53,16 @@ fn parse_gsettings_output(text: &str) -> OsProxyConfig {
     config
 }
 
-fn unquote(s: &str) -> String {
-    s.trim().trim_matches('\'').to_string()
-}
-
-fn host_port(host: Option<&str>, port: Option<&str>) -> Option<String> {
-    let host = unquote(host?);
+fn host_port(host: &str, port: i32) -> Option<String> {
     if host.is_empty() {
         return None;
     }
-    let port = port
-        .and_then(|p| p.trim().parse::<u16>().ok())
-        .filter(|&p| p != 0)?;
+    let port = u16::try_from(port).ok().filter(|&port| port != 0)?;
     Some(format!("{host}:{port}"))
 }
 
-/// Parse a GVariant string array like `['localhost', '127.0.0.0/8']`
-/// (possibly with an `@as` type annotation when empty).
-fn parse_string_array(s: &str) -> Vec<String> {
-    let s = s.trim().trim_start_matches("@as").trim();
-    let inner = s
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or("");
-    inner
-        .split(',')
-        .map(|item| unquote(item.trim()))
-        .filter(|item| !item.is_empty())
-        .collect()
-}
-
-// --------------------------------------------------------------------------
-// Change watcher
-
-pub(crate) struct Watcher {
-    child: Arc<Mutex<Option<Child>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
 pub(crate) fn spawn_watcher(on_change: Arc<dyn Fn() + Send + Sync>) -> Watcher {
-    spawn_watcher_thread(spawn_system_watcher, on_change)
-}
-
-fn spawn_system_watcher() -> Option<Child> {
-    let mut dconf = Command::new("dconf");
-    dconf.args(["watch", "/system/proxy/"]);
-    configure_watcher_command(&mut dconf);
-    let dconf_error = match dconf.spawn() {
-        Ok(child) => return Some(child),
-        Err(error) => error,
-    };
-
-    let mut gsettings = Command::new("gsettings");
-    gsettings.args(["monitor", "org.gnome.system.proxy"]);
-    configure_watcher_command(&mut gsettings);
-    match gsettings.spawn() {
-        Ok(child) => Some(child),
-        Err(gsettings_error) => {
-            log::debug!(
-                "proxy watcher: failed to spawn dconf ({dconf_error}) and gsettings \
-                 ({gsettings_error}); changes will not be detected"
-            );
-            None
-        }
-    }
-}
-
-fn spawn_watcher_thread(
-    spawn_child: impl FnOnce() -> Option<Child> + Send + 'static,
-    on_change: Arc<dyn Fn() + Send + Sync>,
-) -> Watcher {
-    let child = Arc::new(Mutex::new(None));
-    let thread_child = child.clone();
-    let (started_tx, started_rx) = mpsc::sync_channel(0);
-    let thread = std::thread::Builder::new()
-        .name("os-proxy-watch".into())
-        .spawn(move || {
-            let Some(mut spawned_child) = spawn_child() else {
-                let _ = started_tx.send(());
-                return;
-            };
-            let Some(stdout) = spawned_child.stdout.take() else {
-                let _ = spawned_child.kill();
-                let _ = spawned_child.wait();
-                log::debug!("proxy watcher: child stdout was not piped");
-                let _ = started_tx.send(());
-                return;
-            };
-            *thread_child
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spawned_child);
-            let _ = started_tx.send(());
-
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
-                // dconf watch prints the changed path on an unindented
-                // line, then the value indented; only count the former.
-                if !line.is_empty() && !line.starts_with(char::is_whitespace) {
-                    on_change();
-                }
-            }
-        })
-        .expect("failed to spawn proxy watcher thread");
-    started_rx
-        .recv()
-        .expect("proxy watcher thread stopped during startup");
-    Watcher {
-        child,
-        thread: Some(thread),
-    }
-}
-
-/// Configure a proxy watcher to terminate with its owner and inherit only standard I/O.
-fn configure_watcher_command(command: &mut Command) {
-    let expected_parent = std::process::id() as libc::pid_t;
-    let file_descriptor_limit =
-        file_descriptor_limit().map_err(|error| error.raw_os_error().unwrap_or(libc::EIO));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-
-    // SAFETY: pre_exec runs after fork in the single-threaded child. These
-    // operations only invoke async-signal-safe Linux system calls.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            // The parent may have exited between fork and PR_SET_PDEATHSIG.
-            if libc::getppid() != expected_parent {
-                libc::_exit(1);
-            }
-            mark_file_descriptors_close_on_exec(file_descriptor_limit)?;
-            Ok(())
-        });
-    }
-}
-
-fn file_descriptor_limit() -> io::Result<libc::c_int> {
-    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
-    // SAFETY: getrlimit initializes the supplied rlimit on success.
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the successful getrlimit call initialized limit.
-    let limit = unsafe { limit.assume_init() }.rlim_cur;
-    Ok(limit.min(libc::c_int::MAX as libc::rlim_t) as libc::c_int)
-}
-
-fn mark_file_descriptors_close_on_exec(
-    file_descriptor_limit: Result<libc::c_int, libc::c_int>,
-) -> io::Result<()> {
-    // CLOSE_RANGE_CLOEXEC preserves Rust's internal exec-error pipe until exec
-    // succeeds while preventing every non-stdio descriptor from reaching the
-    // watcher program.
-    // SAFETY: close_range operates on the calling process's descriptor table.
-    loop {
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_close_range,
-                3 as libc::c_uint,
-                libc::c_uint::MAX,
-                libc::CLOSE_RANGE_CLOEXEC,
-            )
-        };
-        if result == 0 {
-            return Ok(());
-        }
-        if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            break;
-        }
-    }
-
-    // Older kernels and restricted seccomp profiles may not support
-    // close_range. fcntl is slower but provides equivalent behavior.
-    let file_descriptor_limit = file_descriptor_limit.map_err(io::Error::from_raw_os_error)?;
-    for fd in 3..file_descriptor_limit {
-        let flags = loop {
-            // SAFETY: fcntl accepts any integer descriptor and reports EBADF
-            // for descriptors that are not open.
-            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-            if flags != -1 {
-                break flags;
-            }
-            let error = io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EBADF) => break -1,
-                Some(libc::EINTR) => continue,
-                _ => return Err(error),
-            }
-        };
-        if flags == -1 {
-            continue;
-        }
-        if flags & libc::FD_CLOEXEC == 0 {
-            loop {
-                // SAFETY: flags came from F_GETFD for this descriptor.
-                if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != -1 {
-                    break;
-                }
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::EINTR) {
-                    return Err(error);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-impl Drop for Watcher {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
+    gio::spawn_watcher(on_change)
 }
 
 /// DNS search domains from the OS resolver configuration. On Linux this is
@@ -323,187 +75,23 @@ pub(crate) fn dns_search_domains() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd;
-    #[cfg(target_arch = "x86_64")]
-    use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::process::Command;
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
 
-    #[cfg(target_arch = "x86_64")]
-    const WATCHER_SUBPROCESS_ENV: &str = "OS_PROXY_RESOLVER_WATCHER_SUBPROCESS";
-
-    fn spawn_test_watcher() -> Watcher {
-        spawn_watcher_thread(
-            || {
-                let mut command = Command::new("sleep");
-                command.arg("60");
-                configure_watcher_command(&mut command);
-                Some(command.spawn().expect("failed to spawn test watcher"))
-            },
-            Arc::new(|| {}),
-        )
-    }
-
-    fn watcher_child_pid(watcher: &Watcher) -> u32 {
-        watcher
-            .child
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .expect("test watcher child was not started")
-            .id()
-    }
-
-    fn process_is_running(pid: u32) -> bool {
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
-            Err(error) => panic!("failed to read status for process {pid}: {error}"),
-        };
-        stat.rsplit_once(") ")
-            .and_then(|(_, fields)| fields.chars().next())
-            .is_some_and(|state| state != 'Z')
-    }
-
-    fn wait_for_process_exit(pid: u32) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while process_is_running(pid) {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        true
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    struct ProcessGuard(Option<u32>);
-
-    #[cfg(target_arch = "x86_64")]
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            let Some(pid) = self.0 else {
-                return;
-            };
-            // SAFETY: kill with a positive PID and SIGKILL has no memory-safety
-            // requirements. It is only a fallback for a failed test.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-    }
+    static OS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn watcher_outlives_the_thread_that_created_it() {
-        let (watcher, pid) = std::thread::spawn(|| {
-            let watcher = spawn_test_watcher();
-            let pid = watcher_child_pid(&watcher);
-            (watcher, pid)
-        })
-        .join()
-        .expect("watcher creator thread panicked");
-
-        assert!(
-            process_is_running(pid),
-            "watcher exited with its short-lived caller thread"
-        );
-        drop(watcher);
-        assert!(
-            wait_for_process_exit(pid),
-            "watcher did not exit when dropped"
-        );
-    }
-
-    #[test]
-    fn watcher_does_not_inherit_unrelated_file_descriptors() {
-        let file = std::fs::File::open("/dev/null").expect("failed to open test descriptor");
-        let fd = file.as_raw_fd();
-        // SAFETY: fd belongs to file and remains open for the duration of the test.
-        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        assert_ne!(original_flags, -1, "failed to read descriptor flags");
-        // SAFETY: fd belongs to file and original_flags came from F_GETFD.
-        assert_ne!(
-            unsafe { libc::fcntl(fd, libc::F_SETFD, original_flags & !libc::FD_CLOEXEC) },
-            -1,
-            "failed to make test descriptor inheritable"
-        );
-
-        let watcher = spawn_test_watcher();
-        // Restore the parent's flags immediately; the child has its own descriptor table.
-        // SAFETY: fd still belongs to file and original_flags came from F_GETFD.
-        assert_ne!(
-            unsafe { libc::fcntl(fd, libc::F_SETFD, original_flags) },
-            -1,
-            "failed to restore test descriptor flags"
-        );
-        let pid = watcher_child_pid(&watcher);
-        assert!(
-            !std::path::Path::new(&format!("/proc/{pid}/fd/{fd}")).exists(),
-            "watcher inherited unrelated descriptor {fd}"
-        );
-    }
-
-    // `cross` runs foreign-architecture test binaries through QEMU but does not
-    // configure child processes to do so, so a test binary can only re-exec
-    // itself in the host-compatible x86_64 jobs.
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn watcher_exits_when_parent_process_exits_without_drop() {
-        let pid_file = std::env::temp_dir().join(format!(
-            "os-proxy-resolver-watcher-{}.pid",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&pid_file);
-        let status = Command::new(std::env::current_exe().expect("test executable unavailable"))
-            .arg("watcher_parent_death_subprocess_helper")
-            .arg("--nocapture")
-            .env(WATCHER_SUBPROCESS_ENV, &pid_file)
-            .status()
-            .expect("failed to run watcher parent subprocess");
-        let pid_result = std::fs::read_to_string(&pid_file);
-        let _ = std::fs::remove_file(&pid_file);
-
-        assert!(status.success(), "watcher parent subprocess failed");
-        let pid = pid_result
-            .expect("watcher parent subprocess did not report its child PID")
-            .parse()
-            .expect("watcher parent subprocess reported an invalid child PID");
-        let mut guard = ProcessGuard(Some(pid));
-        let exited = wait_for_process_exit(pid);
-        if exited {
-            guard.0 = None;
-        }
-        assert!(exited, "watcher survived after its parent process exited");
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn watcher_parent_death_subprocess_helper() {
-        let Some(pid_file) = std::env::var_os(WATCHER_SUBPROCESS_ENV) else {
-            return;
-        };
-        let watcher = spawn_test_watcher();
-        std::fs::write(
-            Path::new(&pid_file),
-            watcher_child_pid(&watcher).to_string(),
-        )
-        .expect("failed to report watcher PID");
-        std::process::exit(0);
-    }
-
-    #[test]
-    fn parses_manual_mode() {
-        let out = "\
-org.gnome.system.proxy mode 'manual'
-org.gnome.system.proxy autoconfig-url ''
-org.gnome.system.proxy ignore-hosts ['localhost', '127.0.0.0/8', '::1']
-org.gnome.system.proxy.http host 'hp.example.com'
-org.gnome.system.proxy.http port 3128
-org.gnome.system.proxy.https host ''
-org.gnome.system.proxy.https port 0
-org.gnome.system.proxy.socks host 'sp.example.com'
-org.gnome.system.proxy.socks port 1080
-";
-        let cfg = parse_gsettings_output(out);
+    fn builds_manual_mode() {
+        let cfg = config_from_values(gio::Values {
+            mode: "manual".into(),
+            ignore_hosts: vec!["localhost".into(), "127.0.0.0/8".into(), "::1".into()],
+            http_host: "hp.example.com".into(),
+            http_port: 3128,
+            socks_host: "sp.example.com".into(),
+            socks_port: 1080,
+            ..Default::default()
+        });
         assert!(!cfg.auto_detect);
         assert_eq!(cfg.pac_url, None);
         let rules = cfg.static_rules.unwrap();
@@ -526,30 +114,32 @@ org.gnome.system.proxy.socks port 1080
     }
 
     #[test]
-    fn parses_auto_modes() {
-        let with_url = "org.gnome.system.proxy mode 'auto'\norg.gnome.system.proxy autoconfig-url 'http://x/p.pac'\n";
-        let cfg = parse_gsettings_output(with_url);
+    fn builds_auto_modes() {
+        let cfg = config_from_values(gio::Values {
+            mode: "auto".into(),
+            autoconfig_url: "http://x/p.pac".into(),
+            ..Default::default()
+        });
         assert!(!cfg.auto_detect);
         assert_eq!(cfg.pac_url.as_deref(), Some("http://x/p.pac"));
 
-        let wpad = "org.gnome.system.proxy mode 'auto'\norg.gnome.system.proxy autoconfig-url ''\n";
-        let cfg = parse_gsettings_output(wpad);
+        let cfg = config_from_values(gio::Values {
+            mode: "auto".into(),
+            ..Default::default()
+        });
         assert!(cfg.auto_detect);
         assert_eq!(cfg.pac_url, None);
     }
 
     #[test]
     fn none_mode_is_direct() {
-        let cfg = parse_gsettings_output("org.gnome.system.proxy mode 'none'\n");
+        let cfg = config_from_values(gio::Values {
+            mode: "none".into(),
+            ..Default::default()
+        });
         assert!(!cfg.auto_detect);
         assert!(cfg.pac_url.is_none());
         assert!(cfg.static_rules.is_none());
-    }
-
-    #[test]
-    fn empty_array_annotation() {
-        assert_eq!(parse_string_array("@as []"), Vec::<String>::new());
-        assert_eq!(parse_string_array("['a', 'b']"), vec!["a", "b"]);
     }
 
     fn gsettings_get(schema: &str, key: &str) -> Option<String> {
@@ -611,6 +201,9 @@ org.gnome.system.proxy.socks port 1080
             );
             return;
         }
+        let _test_lock = OS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // No working gsettings / GNOME proxy schema (e.g. headless minimal
         // image) means there is nothing to round-trip through.
         if gsettings_get("org.gnome.system.proxy", "mode").is_none() {
@@ -682,5 +275,58 @@ org.gnome.system.proxy.socks port 1080
             Some("http://wpad.example.com/proxy.pac")
         );
         assert!(!cfg.auto_detect);
+    }
+
+    #[test]
+    fn os_watcher_observes_root_and_child_changes() {
+        if std::env::var_os("OS_PROXY_RESOLVER_OS_TESTS").is_none() {
+            eprintln!(
+                "skipping os_watcher_observes_root_and_child_changes: \
+                 set OS_PROXY_RESOLVER_OS_TESTS=1 to run OS watcher tests"
+            );
+            return;
+        }
+        let _test_lock = OS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let current_mode = gsettings_get("org.gnome.system.proxy", "mode");
+        if current_mode.is_none() {
+            eprintln!(
+                "skipping os_watcher_observes_root_and_child_changes: \
+                 gsettings org.gnome.system.proxy unavailable"
+            );
+            return;
+        }
+
+        let _guard = GSettingsGuard::save(&[
+            ("org.gnome.system.proxy", "mode"),
+            ("org.gnome.system.proxy.http", "host"),
+        ]);
+        let (changed_tx, changed_rx) = mpsc::channel();
+        let watcher = spawn_watcher(Arc::new(move || {
+            let _ = changed_tx.send(());
+        }));
+
+        let next_mode = if current_mode.as_deref() == Some("'manual'") {
+            "none"
+        } else {
+            "manual"
+        };
+        assert!(gsettings_set("org.gnome.system.proxy", "mode", next_mode));
+        changed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("GIO watcher did not observe root proxy setting change");
+
+        while changed_rx.try_recv().is_ok() {}
+        assert!(gsettings_set(
+            "org.gnome.system.proxy.http",
+            "host",
+            "watcher-test.example.com"
+        ));
+        changed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("GIO watcher did not observe child proxy setting change");
+
+        drop(watcher);
     }
 }
