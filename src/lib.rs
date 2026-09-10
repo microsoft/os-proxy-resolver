@@ -41,7 +41,7 @@
 //! |---|---|---|---|
 //! | Windows | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DHCP/DNS WPAD; WinHTTP fallback with no backend | registry notification |
 //! | macOS | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
-//! | Linux | GNOME `org.gnome.system.proxy` (gsettings) | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
+//! | Linux | GNOME `org.gnome.system.proxy` via runtime-loaded GIO | built-in [QuickJS] PAC engine + DNS WPAD | in-process GSettings callback |
 //!
 //! On Windows, WinHTTP always reads Internet Settings. DHCP option 252 is
 //! probed before the shared DNS WPAD path; an embedded PAC backend evaluates

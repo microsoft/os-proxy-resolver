@@ -9,7 +9,7 @@
 //!
 //! - `read_config()` — a snapshot of the OS proxy configuration
 //! - `spawn_watcher(on_change)` — a thread wired to the native change signal
-//!   (SCDynamicStore callback / dconf-gsettings monitor / registry notify)
+//!   (SCDynamicStore callback / GSettings callback / registry notify)
 //!   that invokes `on_change` on every possible change. Returned handle stops
 //!   the watcher on drop.
 
