@@ -72,7 +72,7 @@ psl = "2"
 # build-dependency below because serialized modules only deserialize in the
 # same Wasmtime version. (The `pac-engine-wasmtime-jit` feature deliberately
 # re-adds `cranelift` here.)
-wasmtime = { version = "=46.0.1", optional = true, default-features = false, features = ["runtime", "std"] }
+wasmtime = { version = "=46.0.2", optional = true, default-features = false, features = ["runtime", "std"] }
 
 [build-dependencies]
 # Compile-only Wasmtime (Cranelift, no runtime) used by build.rs to
@@ -84,7 +84,7 @@ wasmtime = { version = "=46.0.1", optional = true, default-features = false, fea
 # compiles every Cranelift ISA into the build script, so cross-compiling the
 # crate (macOS -> Windows, x86_64 container -> aarch64/armv7, ...) can still
 # AOT the guest for the *target* architecture.
-wasmtime = { version = "=46.0.1", optional = true, default-features = false, features = ["cranelift", "std", "all-arch"] }
+wasmtime = { version = "=46.0.2", optional = true, default-features = false, features = ["cranelift", "std", "all-arch"] }
 # Compiles the wasm2c-generated C, the vendored wasm-rt runtime and the C shim
 # for the `pac-engine-wasm2c` backend.
 cc = { version = "1", optional = true }
