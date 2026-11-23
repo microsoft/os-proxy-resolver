@@ -55,7 +55,13 @@ resolution.
 |---|---|---|---|
 | **Windows** | `WinHttpGetIEProxyConfigForCurrentUser` | selected embedded backend + DHCP/DNS WPAD; WinHTTP fallback when backend-less | registry change notification |
 | **macOS** | `SCDynamicStoreCopyProxies` | built-in [QuickJS] PAC engine + DNS WPAD | `SCDynamicStore` callback |
-| **Linux** | GNOME `org.gnome.system.proxy` via `gsettings` | built-in [QuickJS] PAC engine + DNS WPAD | `dconf watch` / `gsettings monitor` |
+| **Linux** | GNOME `org.gnome.system.proxy` via runtime-loaded GIO | built-in [QuickJS] PAC engine + DNS WPAD | in-process GSettings callback |
+
+Linux loads GLib/GIO at runtime rather than linking it into the library. On
+headless systems without GIO or the GNOME proxy schema, OS configuration is
+unavailable and resolution continues with the environment-variable layer.
+Alpine users can install its `glib` runtime package to enable GSettings-backed
+OS configuration.
 
 ### PAC backends
 
@@ -209,6 +215,8 @@ retrying dead `a` first on every request (mirrors Chromium's
 is returned and retried.
 
 ## Building
+
+The minimum supported Rust version is 1.94.
 
 ```sh
 git clone <repo>
